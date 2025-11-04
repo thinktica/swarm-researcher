@@ -171,23 +171,27 @@ class LocalLLMBackend:
         if self._try_llamacpp():
             self.backend = 'llamacpp'
             if self.parent_agent:
+                print("Using Llama.cpp backend...")
                 self.parent_agent.emit("Using Llama.cpp backend", type="system")
             return
         
         if self._try_transformers():
             self.backend = 'transformers'
             if self.parent_agent:
+                print("Using transformers backend...")
                 self.parent_agent.emit("Using Transformers backend", type="system")
             return
         
         if self._try_ollama():
             self.backend = 'ollama'
             if self.parent_agent:
+                print("Using Ollama backend...")
                 self.parent_agent.emit("Using Ollama backend", type="system")
             return
         
         self.backend = 'mock'
         if self.parent_agent:
+            print("No local LLM available - using mock responses...")
             self.parent_agent.emit("No local LLM available - using mock responses", type="warning")
     
     def _try_llamacpp(self) -> bool:
@@ -211,6 +215,7 @@ class LocalLLMBackend:
             
             if not model_path.exists():
                 if self.parent_agent:
+                    print("Downloading Mistral 7B model...")
                     self.parent_agent.emit("Downloading Mistral 7B model...", type="progress")
                 
                 url = "https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
@@ -219,6 +224,7 @@ class LocalLLMBackend:
                     import urllib.request
                     urllib.request.urlretrieve(url, model_path)
                     if self.parent_agent:
+                        print(f"Model downloaded to {model_path}")
                         self.parent_agent.emit(f"Model downloaded to {model_path}", type="system")
                 except Exception as e:
                     return False
@@ -854,6 +860,7 @@ class SwarmOrchestrator:
         """Process response with challenge-driven approach"""
         
         if self.parent_agent:
+            print(f"Processing iteration {context.iteration}")
             self.parent_agent.emit(f"Processing iteration {context.iteration}", type="progress")
         
         iteration_results = {
@@ -895,6 +902,7 @@ class SwarmOrchestrator:
                         'confidence': resolution['confidence']
                     })
                     if self.parent_agent:
+                        print(f"Resolved challenge: {challenge.statement[:50]}")
                         self.parent_agent.emit(
                             f"Resolved challenge: {challenge.statement[:50]}",
                             type="resolution",
@@ -1022,6 +1030,7 @@ class SwarmOrchestrator:
                             logger.error(f"Failed to store finding: {e}")
                 
                 if self.parent_agent:
+                    print(f"Stored {stored_count} items to Neo4j")
                     self.parent_agent.emit(
                         f"Stored {stored_count} items to Neo4j",
                         type="progress"
@@ -1056,6 +1065,7 @@ class SwarmOrchestrator:
             
             if iteration_result['decision'] == 'complete':
                 if self.parent_agent:
+                    print(f"Quality threshold reached at iteration {i+1}")
                     self.parent_agent.emit(
                         f"Quality threshold reached at iteration {i+1}",
                         type="progress"
@@ -1098,6 +1108,7 @@ class RemoteLLMOrchestrator:
         if not self.api_key:
             msg = f"No API key for {provider}. Set {provider.upper()}_API_KEY"
             if self.parent_agent:
+                print(f"No API key for {provider}. Set {provider.upper()}_API_KEY")
                 self.parent_agent.emit(msg, type="warning")
             else:
                 logger.warning(msg)
@@ -1174,6 +1185,7 @@ class RemoteLLMOrchestrator:
                     wait_time = int(retry_after) + 1
                     
                     if self.parent_agent:
+                        print(f"Rate limit hit. Waiting {wait_time} seconds...")
                         self.parent_agent.emit(
                             f"Rate limit hit. Waiting {wait_time} seconds...",
                             type="warning"
@@ -1189,6 +1201,7 @@ class RemoteLLMOrchestrator:
             
         except Exception as e:
             if self.parent_agent:
+                print(f"Groq error: {e}")
                 self.parent_agent.emit(f"Groq error: {e}", type="error")
             return "[Remote LLM error]"
 
@@ -1207,6 +1220,7 @@ class Agent(ResearchAgent):
         """Initialize the agent"""
         super().__init__()
         
+        print("Initializing Challenge-Driven Research Agent")
         self.emit("Initializing Challenge-Driven Research Agent", type="system")
         
         # Initialize components
@@ -1239,6 +1253,7 @@ class Agent(ResearchAgent):
         except:
             self.arxiv_client = None
         
+        print("Agent ready")
         self.emit(
             "Agent ready",
             type="system",
@@ -1256,11 +1271,13 @@ class Agent(ResearchAgent):
             )
             with driver.session() as session:
                 session.run("RETURN 1")
-            
+            print("Connected to Neo4j")
+
             self.emit("Connected to Neo4j", type="system")
             return driver
             
         except Exception as e:
+            print(f"Neo4j connection failed: {str(e)[:100]}")
             self.emit(f"Neo4j connection failed: {str(e)[:100]}", type="warning")
             return None
     
@@ -1274,6 +1291,7 @@ class Agent(ResearchAgent):
         Returns:
             Dictionary containing research results
         """
+        print(f"Starting research: {question}")
         self.emit(
             f"Starting research: {question}",
             type="progress",
@@ -1319,6 +1337,7 @@ class Agent(ResearchAgent):
                 "investigation_id": self.investigation_id
             }
             
+            print("Research complete")
             self.emit(
                 "Research complete",
                 type="discovery",
@@ -1351,6 +1370,7 @@ class Agent(ResearchAgent):
         
         confidence = min(confidence, 1.0)
         
+        print(f"Validated finding with confidence: {confidence}")
         self.emit(
             f"Validated finding",
             type="validation",
@@ -1362,6 +1382,7 @@ class Agent(ResearchAgent):
     def query(self, cypher: str) -> List[Dict[str, Any]]:
         """Execute Cypher query"""
         if not self.driver:
+            print("Neo4j not available")
             self.emit("Neo4j not available", type="warning")
             return []
         
@@ -1370,6 +1391,7 @@ class Agent(ResearchAgent):
                 result = session.run(cypher)
                 records = [dict(record) for record in result]
                 
+                print(f"Query returned {len(records)} results")
                 self.emit(
                     f"Query returned {len(records)} results",
                     type="query"
@@ -1378,6 +1400,7 @@ class Agent(ResearchAgent):
                 return records
                 
         except Exception as e:
+            print(f"Query error: {str(e)}")
             self.emit(f"Query error: {str(e)}", type="error")
             return []
     
@@ -1402,6 +1425,7 @@ class Agent(ResearchAgent):
     
     async def _research_async(self, goal: str, max_depth: int = 3):
         """Internal async research method"""
+        print("Starting challenge-driven research")
         self.emit("Starting challenge-driven research", type="progress")
         
         # Create root challenge
@@ -1422,6 +1446,7 @@ class Agent(ResearchAgent):
             
             nodes_explored += 1
             
+            print(f"Exploring: {current_node.content[:80]}")
             self.emit(
                 f"Exploring: {current_node.content[:80]}",
                 type="progress",
@@ -1471,6 +1496,7 @@ class Agent(ResearchAgent):
                 current_node.resolved_at = datetime.now()
                 challenges_resolved += swarm_results['resolved_challenges']
                 
+                print(f"Resolved: {current_node.content[:50]}")
                 self.emit(
                     f"Resolved: {current_node.content[:50]}",
                     type="resolution",
@@ -1489,6 +1515,7 @@ class Agent(ResearchAgent):
                 )
                 self.node_queue.append(child)
         
+        print("Research exploration complete")
         self.emit(
             "Research exploration complete",
             type="progress",
@@ -1517,6 +1544,7 @@ class Agent(ResearchAgent):
         if parent:
             parent.children.append(node_id)
         
+        print(f"Created node: {content[:50]}")
         self.emit(
             f"Created node: {content[:50]}",
             type="progress",
@@ -1545,9 +1573,11 @@ class Agent(ResearchAgent):
                     'url': paper.entry_id
                 })
             
+            print(f"Found {len(papers)} papers")
             self.emit(f"Found {len(papers)} papers", type="progress")
             
         except Exception as e:
+            print(f"ArXiv error: {e}")
             self.emit(f"ArXiv error: {e}", type="error")
         
         return papers
@@ -1576,15 +1606,18 @@ class Agent(ResearchAgent):
                         confidence=finding.get('confidence', 0))
                         stored += 1
                 
+                print(f"Stored {stored} findings")
                 self.emit(f"Stored {stored} findings", type="progress")
                 
         except Exception as e:
+            print(f"Could not store findings: {str(e)[:50]}")
             self.emit(f"Could not store findings: {str(e)[:50]}", type="error")
     
     def __del__(self):
         """Cleanup"""
         if hasattr(self, 'driver') and self.driver:
             self.driver.close()
+            print("Closed Neo4j connection")
             self.emit("Closed Neo4j connection", type="system")
 
 
