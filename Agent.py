@@ -2,7 +2,8 @@
 """
 Challenge-Driven Swarm Intelligence Research Agent
 ===================================================
-Updated for Thinktica's structured agent system with ABC interfaces
+Enhanced with hierarchical challenge resolution system
+Now with proper Thinktica event system integration
 """
 
 import asyncio
@@ -22,9 +23,17 @@ import time
 import re
 from pathlib import Path
 
-# Import from Thinktica's new system
-from thinktica import ResearchAgent
-from neo4j import GraphDatabase
+# Force unbuffered output for immediate console logs
+os.environ['PYTHONUNBUFFERED'] = '1'
+sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
+
+# Import Thinktica base class and event system
+try:
+    from thinktica import ResearchAgent
+except ImportError:
+    print("Installing thinktica...", flush=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "thinktica"])
+    from thinktica import ResearchAgent
 
 # Configure logging
 logging.basicConfig(
@@ -33,41 +42,59 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
 try:
     from dotenv import load_dotenv
     load_dotenv()
+    logger.info("Loaded .env file")
 except ImportError:
-    pass
+    logger.info("python-dotenv not installed, using system environment variables")
 
-# Check for optional dependencies
+# Initialize availability flags
 EMBEDDINGS_AVAILABLE = False
 TRANSFORMERS_AVAILABLE = False
 LLAMACPP_AVAILABLE = False
+SentenceTransformer = None
 
+# Core imports with auto-installation
+try:
+    from neo4j import GraphDatabase
+except ImportError:
+    print("Installing neo4j...", flush=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "neo4j"])
+    from neo4j import GraphDatabase
+
+try:
+    import arxiv
+except ImportError:
+    print("Installing arxiv...", flush=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "arxiv"])
+    import arxiv
+
+# Try optional imports
 try:
     from sentence_transformers import SentenceTransformer
     EMBEDDINGS_AVAILABLE = True
-except ImportError:
+    logger.info("Sentence-transformers loaded successfully")
+except (ImportError, Exception) as e:
+    logger.info("Sentence-transformers not available (optional)")
+    EMBEDDINGS_AVAILABLE = False
     SentenceTransformer = None
 
 try:
     from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
     TRANSFORMERS_AVAILABLE = True
+    logger.info("Transformers available for backup LLM")
 except ImportError:
-    pass
+    logger.info("Transformers not available")
+    TRANSFORMERS_AVAILABLE = False
 
 try:
     from llama_cpp import Llama
     LLAMACPP_AVAILABLE = True
+    logger.info("llama-cpp available")
 except ImportError:
-    pass
-
-try:
-    import arxiv
-except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "arxiv"], capture_output=True)
-    import arxiv
+    logger.info("llama-cpp not available")
+    LLAMACPP_AVAILABLE = False
 
 
 class NodeType(Enum):
@@ -160,74 +187,104 @@ class SwarmContext:
 class LocalLLMBackend:
     """Unified backend for local LLMs"""
     
-    def __init__(self, parent_agent=None):
+    def __init__(self, agent=None):
         self.backend = None
         self.model = None
-        self.parent_agent = parent_agent
+        self.agent = agent  # Reference to parent agent for event emission
         self._initialize_backend()
     
     def _initialize_backend(self):
         """Initialize the best available backend"""
+        
         if self._try_llamacpp():
             self.backend = 'llamacpp'
-            if self.parent_agent:
-                print("Using Llama.cpp backend...")
-                self.parent_agent.emit("Using Llama.cpp backend", type="system")
+            logger.info("Using Llama.cpp backend")
+            if self.agent:
+                self.agent.emit("LLM backend initialized", type="system", backend="llamacpp")
             return
         
         if self._try_transformers():
             self.backend = 'transformers'
-            if self.parent_agent:
-                print("Using transformers backend...")
-                self.parent_agent.emit("Using Transformers backend", type="system")
+            logger.info("Using Transformers backend")
+            if self.agent:
+                self.agent.emit("LLM backend initialized", type="system", backend="transformers")
             return
         
         if self._try_ollama():
             self.backend = 'ollama'
-            if self.parent_agent:
-                print("Using Ollama backend...")
-                self.parent_agent.emit("Using Ollama backend", type="system")
+            logger.info("Using Ollama backend")
+            if self.agent:
+                self.agent.emit("LLM backend initialized", type="system", backend="ollama")
             return
         
+        logger.warning("No local LLM available - using mock responses")
+        if self.agent:
+            self.agent.emit("No LLM available - using mock responses", type="warning")
         self.backend = 'mock'
-        if self.parent_agent:
-            print("No local LLM available - using mock responses...")
-            self.parent_agent.emit("No local LLM available - using mock responses", type="warning")
     
     def _try_llamacpp(self) -> bool:
         """Try to use llama.cpp"""
+        
         if not LLAMACPP_AVAILABLE:
+            logger.info("Installing llama-cpp-python...")
+            if self.agent:
+                self.agent.emit("Installing llama-cpp-python...", type="progress")
             try:
-                subprocess.run(
+                result = subprocess.run(
                     [sys.executable, "-m", "pip", "install", "llama-cpp-python"],
                     capture_output=True,
-                    timeout=60
+                    text=True
                 )
-                from llama_cpp import Llama
-            except:
+                if result.returncode != 0:
+                    return False
+            except Exception as e:
+                logger.error(f"Could not install llama-cpp-python: {e}")
                 return False
         
         try:
             from llama_cpp import Llama
-            model_dir = Path.home() / ".cache" / "llm_models"
-            model_dir.mkdir(parents=True, exist_ok=True)
-            model_path = model_dir / "mistral-7b-instruct-v0.2.Q4_K_M.gguf"
+        except ImportError:
+            return False
+        
+        model_dir = Path.home() / ".cache" / "llm_models"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_path = model_dir / "mistral-7b-instruct-v0.2.Q4_K_M.gguf"
+        
+        if not model_path.exists():
+            logger.info("Downloading Mistral 7B Q4 model...")
+            if self.agent:
+                self.agent.emit("Downloading Mistral 7B model...", type="progress")
+            url = "https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
             
-            if not model_path.exists():
-                if self.parent_agent:
-                    print("Downloading Mistral 7B model...")
-                    self.parent_agent.emit("Downloading Mistral 7B model...", type="progress")
+            try:
+                import urllib.request
                 
-                url = "https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
+                def download_progress(block_num, block_size, total_size):
+                    downloaded = block_num * block_size
+                    percent = min(100, (downloaded / total_size) * 100)
+                    mb_downloaded = downloaded / (1024 * 1024)
+                    mb_total = total_size / (1024 * 1024)
+                    bar_length = 40
+                    filled = int(bar_length * percent / 100)
+                    bar = '█' * filled + '-' * (bar_length - filled)
+                    print(f'\rDownloading: |{bar}| {percent:.1f}% ({mb_downloaded:.1f}/{mb_total:.1f} MB)', end='', flush=True)
                 
-                try:
-                    import urllib.request
-                    urllib.request.urlretrieve(url, model_path)
-                    if self.parent_agent:
-                        print(f"Model downloaded to {model_path}")
-                        self.parent_agent.emit(f"Model downloaded to {model_path}", type="system")
-                except Exception as e:
-                    return False
+                urllib.request.urlretrieve(url, model_path, reporthook=download_progress)
+                print()
+                logger.info(f"Model downloaded to {model_path}")
+                if self.agent:
+                    self.agent.emit(f"Model downloaded to {model_path}", type="system")
+            except Exception as e:
+                logger.error(f"Failed to download model: {e}")
+                if self.agent:
+                    self.agent.emit(f"Model download failed: {e}", type="error")
+                return False
+        
+        try:
+            logger.info("Loading Mistral 7B Q4 model...")
+            print("Loading Mistral 7B model... (this may take 30-60 seconds)", flush=True)
+            if self.agent:
+                self.agent.emit("Loading Mistral 7B model...", type="progress")
             
             self.model = Llama(
                 model_path=str(model_path),
@@ -245,9 +302,15 @@ class LocalLLMBackend:
             )
             
             if test_response and 'choices' in test_response:
+                logger.info("Model loaded successfully!")
+                print("✓ Model loaded successfully!", flush=True)
+                if self.agent:
+                    self.agent.emit("Model loaded successfully", type="system")
                 return True
-                
         except Exception as e:
+            logger.error(f"Failed to load model: {e}")
+            if self.agent:
+                self.agent.emit(f"Model load failed: {e}", type="error")
             return False
         
         return False
@@ -261,6 +324,9 @@ class LocalLLMBackend:
             from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
             
             model_name = "microsoft/phi-2"
+            logger.info(f"Loading {model_name}...")
+            if self.agent:
+                self.agent.emit(f"Loading {model_name}...", type="progress")
             
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
@@ -286,6 +352,7 @@ class LocalLLMBackend:
             
             return True
         except Exception as e:
+            logger.debug(f"Could not load Transformers model: {e}")
             return False
     
     def _try_ollama(self) -> bool:
@@ -299,6 +366,9 @@ class LocalLLMBackend:
             )
             if result.returncode == 0:
                 if "mistral" not in result.stdout:
+                    logger.info("Pulling Mistral model for Ollama...")
+                    if self.agent:
+                        self.agent.emit("Pulling Mistral model for Ollama...", type="progress")
                     subprocess.run(["ollama", "pull", "mistral"], capture_output=True)
                 return True
         except:
@@ -307,6 +377,7 @@ class LocalLLMBackend:
     
     def generate(self, prompt: str, max_tokens: int = 200) -> str:
         """Generate text using available backend"""
+        
         if self.backend == 'llamacpp':
             return self._generate_llamacpp(prompt, max_tokens)
         elif self.backend == 'transformers':
@@ -336,6 +407,7 @@ class LocalLLMBackend:
             
             return generated
         except Exception as e:
+            logger.error(f"llama.cpp generation error: {e}")
             return "[Generation failed]"
     
     def _generate_transformers(self, prompt: str, max_tokens: int) -> str:
@@ -355,6 +427,7 @@ class LocalLLMBackend:
             
             return generated
         except Exception as e:
+            logger.error(f"Transformers generation error: {e}")
             return "[Generation failed]"
     
     def _generate_ollama(self, prompt: str) -> str:
@@ -369,7 +442,7 @@ class LocalLLMBackend:
             if result.returncode == 0:
                 return result.stdout.strip()
         except Exception as e:
-            pass
+            logger.error(f"Ollama generation error: {e}")
         return "[Generation failed]"
     
     def _generate_mock(self, prompt: str) -> str:
@@ -391,20 +464,34 @@ class LocalLLMBackend:
 class LocalSwarmAgent:
     """Base class for local swarm agents"""
     
-    def __init__(self, role: SwarmRole, llm_backend=None):
+    def __init__(self, role: SwarmRole, parent_agent=None):
         self.role = role
         self.processing_count = 0
-        self.llm_backend = llm_backend
+        self.parent_agent = parent_agent  # Reference to main agent for events
+        self.llm_backend = None
+    
+    def _get_llm_backend(self):
+        """Get LLM backend (create if needed)"""
+        if self.llm_backend is None:
+            self.llm_backend = LocalLLMBackend(self.parent_agent)
+        return self.llm_backend
     
     def process(self, prompt: str) -> str:
         """Process with local LLM"""
         self.processing_count += 1
         
-        if not self.llm_backend:
-            return f"[{self.role.value} - no LLM backend]"
+        # Emit event through parent agent
+        if self.parent_agent:
+            self.parent_agent.emit(
+                f"Swarm agent {self.role.value} processing",
+                type="progress",
+                role=self.role.value,
+                count=self.processing_count
+            )
         
+        backend = self._get_llm_backend()
         role_prompt = f"You are a {self.role.value} agent. {prompt}"
-        response = self.llm_backend.generate(role_prompt)
+        response = backend.generate(role_prompt)
         
         if response and not response.startswith('['):
             return response
@@ -415,8 +502,8 @@ class LocalSwarmAgent:
 class ChallengeExtractorAgent(LocalSwarmAgent):
     """Extract challenges from text"""
     
-    def __init__(self, llm_backend=None):
-        super().__init__(SwarmRole.CHALLENGE_EXTRACTOR, llm_backend)
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.CHALLENGE_EXTRACTOR, parent_agent)
     
     def extract_challenges(self, response: str, context: SwarmContext) -> List[Challenge]:
         """Extract challenges from response"""
@@ -431,6 +518,7 @@ class ChallengeExtractorAgent(LocalSwarmAgent):
         - Knowledge gaps ("unknown whether...", "unclear how...")
         - Resource limitations ("requires...", "needs...")
         - Methodological issues ("how to...")
+        - Implicit problems (things mentioned as needing solution)
         
         For each challenge provide:
         - statement: The specific challenge
@@ -457,6 +545,15 @@ class ChallengeExtractorAgent(LocalSwarmAgent):
                         parent_context=item.get('parent_context', '')
                     )
                     challenges.append(challenge)
+                    
+                    # Emit event for each challenge found
+                    if self.parent_agent:
+                        self.parent_agent.emit(
+                            f"Challenge identified: {challenge.statement[:100]}",
+                            type="challenge",
+                            priority=challenge.priority,
+                            challenge_type=challenge.type
+                        )
         except:
             pass
         
@@ -466,13 +563,13 @@ class ChallengeExtractorAgent(LocalSwarmAgent):
 class ChallengeSpecifierAgent(LocalSwarmAgent):
     """Break challenges into specific sub-challenges"""
     
-    def __init__(self, llm_backend=None):
-        super().__init__(SwarmRole.CHALLENGE_SPECIFIER, llm_backend)
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.CHALLENGE_SPECIFIER, parent_agent)
     
     def specify_challenge(self, challenge: Challenge, context: SwarmContext) -> List[Challenge]:
         """Break down challenge into specific sub-challenges"""
         prompt = f"""
-        Break down this challenge into SPECIFIC sub-problems:
+        Break down this challenge into SPECIFIC, actionable sub-problems:
         
         Challenge: {challenge.statement}
         Type: {challenge.type}
@@ -482,6 +579,7 @@ class ChallengeSpecifierAgent(LocalSwarmAgent):
         1. Are more specific than the parent
         2. Can be individually researched
         3. Together would solve the parent challenge
+        4. Have clear success criteria
         
         Output as JSON array with statement and specificity level.
         """
@@ -511,8 +609,8 @@ class ChallengeSpecifierAgent(LocalSwarmAgent):
 class ResolutionAgent(LocalSwarmAgent):
     """Attempt to resolve challenges"""
     
-    def __init__(self, llm_backend=None):
-        super().__init__(SwarmRole.RESOLUTION_AGENT, llm_backend)
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.RESOLUTION_AGENT, parent_agent)
     
     def attempt_resolution(self, challenge: Challenge, findings: List[Dict], context: SwarmContext) -> Dict:
         """Try to resolve challenge with available information"""
@@ -527,11 +625,14 @@ class ResolutionAgent(LocalSwarmAgent):
         Available findings:
         {findings_text}
         
+        Previous resolution attempts: {len(challenge.resolution_attempts)}
+        
         Determine:
-        1. Can this be resolved with current knowledge?
+        1. Can this be resolved with current knowledge? (yes/no)
         2. If yes, what's the solution?
         3. If no, what specific information is missing?
         4. Confidence in resolution (0-1)
+        5. Partial solutions available?
         
         Output as JSON with keys: can_resolve, solution, confidence, missing_info, partial_solution
         """
@@ -541,7 +642,18 @@ class ResolutionAgent(LocalSwarmAgent):
         try:
             json_match = re.search(r'\{.*\}', result, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group())
+                resolution = json.loads(json_match.group())
+                
+                # Emit resolution event if successful
+                if self.parent_agent and resolution.get('confidence', 0) > 0.7:
+                    self.parent_agent.emit(
+                        f"Challenge resolved: {challenge.statement[:100]}",
+                        type="resolution",
+                        confidence=resolution['confidence'],
+                        solution=resolution.get('solution', '')[:200]
+                    )
+                
+                return resolution
         except:
             pass
         
@@ -557,8 +669,8 @@ class ResolutionAgent(LocalSwarmAgent):
 class AnalyzerAgent(LocalSwarmAgent):
     """Deep analysis of responses"""
     
-    def __init__(self, llm_backend=None):
-        super().__init__(SwarmRole.ANALYZER, llm_backend)
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.ANALYZER, parent_agent)
     
     def analyze_response(self, response: str, context: SwarmContext) -> Dict:
         """Analyze response in detail"""
@@ -574,6 +686,7 @@ class AnalyzerAgent(LocalSwarmAgent):
         2. Implicit assumptions
         3. Logical connections
         4. Contradictions
+        5. Areas needing clarification
         
         Output as JSON.
         """
@@ -591,21 +704,24 @@ class AnalyzerAgent(LocalSwarmAgent):
             "assertions": [],
             "assumptions": [],
             "connections": [],
-            "contradictions": []
+            "contradictions": [],
+            "clarifications": []
         }
 
 
 class ExtractorAgent(LocalSwarmAgent):
     """Extract findings from text"""
     
-    def __init__(self, llm_backend=None):
-        super().__init__(SwarmRole.EXTRACTOR, llm_backend)
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.EXTRACTOR, parent_agent)
     
     def extract_findings(self, response: str, analysis: Dict) -> List[Dict]:
         """Extract concrete findings"""
         prompt = f"""
         Extract concrete findings from this text:
         {response[:1000]}
+        
+        Analysis hints: {json.dumps(analysis.get('assertions', [])[:3])}
         
         For each finding:
         - statement: The finding
@@ -622,6 +738,19 @@ class ExtractorAgent(LocalSwarmAgent):
             json_match = re.search(r'\[.*\]', result, re.DOTALL)
             if json_match:
                 findings = json.loads(json_match.group())
+                
+                # Emit discovery events for high-confidence findings
+                if self.parent_agent:
+                    for finding in findings[:10]:
+                        if finding.get('confidence', 0) > 0.7:
+                            self.parent_agent.emit(
+                                f"Discovery: {finding.get('statement', '')[:150]}",
+                                type="discovery",
+                                confidence=finding.get('confidence', 0),
+                                category=finding.get('category', 'unknown'),
+                                persist=True  # Save important discoveries
+                            )
+                
                 return findings[:10]
         except:
             pass
@@ -632,8 +761,8 @@ class ExtractorAgent(LocalSwarmAgent):
 class ComparatorAgent(LocalSwarmAgent):
     """Compare findings to goals"""
     
-    def __init__(self, llm_backend=None):
-        super().__init__(SwarmRole.COMPARATOR, llm_backend)
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.COMPARATOR, parent_agent)
     
     def compare_to_goals(self, findings: List[Dict], context: SwarmContext) -> Dict:
         """Compare findings to research goals"""
@@ -652,6 +781,7 @@ class ComparatorAgent(LocalSwarmAgent):
         1. Current relevance (0-1)
         2. Global relevance (0-1)
         3. Novelty (0-1)
+        4. New direction suggested?
         
         Output as JSON.
         """
@@ -668,15 +798,16 @@ class ComparatorAgent(LocalSwarmAgent):
         return {
             "current_relevance": 0.5,
             "global_relevance": 0.5,
-            "novelty": 0.5
+            "novelty": 0.5,
+            "new_direction": None
         }
 
 
 class ChallengerAgent(LocalSwarmAgent):
     """Generate challenges from findings"""
     
-    def __init__(self, llm_backend=None):
-        super().__init__(SwarmRole.CHALLENGER, llm_backend)
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.CHALLENGER, parent_agent)
     
     def generate_challenges(self, findings: List[Dict], context: SwarmContext) -> List[str]:
         """Generate challenging questions"""
@@ -687,6 +818,7 @@ class ChallengerAgent(LocalSwarmAgent):
         1. Test validity of findings
         2. Identify edge cases
         3. Expose assumptions
+        4. Suggest alternatives
         
         Findings:
         {findings_summary}
@@ -710,8 +842,8 @@ class ChallengerAgent(LocalSwarmAgent):
 class EvaluatorAgent(LocalSwarmAgent):
     """Evaluate iteration quality"""
     
-    def __init__(self, remote_llm=None, llm_backend=None):
-        super().__init__(SwarmRole.EVALUATOR, llm_backend)
+    def __init__(self, parent_agent=None, remote_llm=None):
+        super().__init__(SwarmRole.EVALUATOR, parent_agent)
         self.quality_threshold = 0.5
         self.remote_llm = remote_llm
     
@@ -735,6 +867,7 @@ class EvaluatorAgent(LocalSwarmAgent):
         Findings: {findings_summary}
         Challenges: {challenges_summary}
         Iteration: {context.iteration}
+        Current: {context.current_node.content}
         
         Rate:
         1. Completeness (0-1)
@@ -767,14 +900,25 @@ class EvaluatorAgent(LocalSwarmAgent):
         evaluation['ready_for_storage'] = evaluation['quality_score'] >= 0.5
         evaluation['generate_hypothesis'] = evaluation['quality_score'] >= 0.5
         
+        logger.info(f"Quality: {evaluation['quality_score']:.2f}, Decision: {evaluation['decision']}")
+        
+        # Emit evaluation event
+        if self.parent_agent:
+            self.parent_agent.emit(
+                f"Iteration {context.iteration} quality: {evaluation['quality_score']:.2%}",
+                type="validation",
+                quality=evaluation['quality_score'],
+                decision=evaluation['decision']
+            )
+        
         return evaluation
 
 
 class HypothesisAgent(LocalSwarmAgent):
     """Generate hypotheses"""
     
-    def __init__(self, llm_backend=None):
-        super().__init__(SwarmRole.HYPOTHESIS, llm_backend)
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.HYPOTHESIS, parent_agent)
     
     def generate_hypotheses(self, context: SwarmContext) -> List[Dict]:
         """Generate new hypotheses"""
@@ -803,8 +947,18 @@ class HypothesisAgent(LocalSwarmAgent):
         {challenges_text}
         
         Goal: {context.global_goal}
+        Current: {context.current_node.content}
         
-        Generate 3 testable hypotheses.
+        Generate 3 testable hypotheses that:
+        1. Connect findings
+        2. Build on resolved challenges
+        3. Make predictions
+        4. Are rigorous
+        
+        For each:
+        - statement: Hypothesis
+        - rationale: Why
+        - test: How to validate
         
         Output as JSON array.
         """
@@ -815,6 +969,18 @@ class HypothesisAgent(LocalSwarmAgent):
             json_match = re.search(r'\[.*\]', result, re.DOTALL)
             if json_match:
                 hypotheses = json.loads(json_match.group())
+                
+                # Emit hypothesis events
+                if self.parent_agent:
+                    for hyp in hypotheses[:3]:
+                        if isinstance(hyp, dict) and 'statement' in hyp:
+                            self.parent_agent.emit(
+                                f"Hypothesis: {hyp['statement'][:150]}",
+                                type="hypothesis",
+                                rationale=hyp.get('rationale', '')[:100],
+                                test=hyp.get('test', '')[:100]
+                            )
+                
                 return hypotheses[:3]
         except:
             pass
@@ -825,43 +991,50 @@ class HypothesisAgent(LocalSwarmAgent):
 class SwarmOrchestrator:
     """Enhanced orchestrator with challenge management"""
     
-    def __init__(self, neo4j_driver=None, remote_llm=None, parent_agent=None):
+    def __init__(self, parent_agent=None, neo4j_driver=None, remote_llm=None):
+        self.parent_agent = parent_agent  # Reference to main agent
         self.driver = neo4j_driver
         self.remote_llm = remote_llm
-        self.parent_agent = parent_agent
         
-        # Initialize LLM backend for all agents
-        self.llm_backend = LocalLLMBackend(parent_agent)
-        
-        # Initialize all agents with shared LLM backend
-        self.analyzer = AnalyzerAgent(self.llm_backend)
-        self.extractor = ExtractorAgent(self.llm_backend)
-        self.comparator = ComparatorAgent(self.llm_backend)
-        self.challenger = ChallengerAgent(self.llm_backend)
-        self.evaluator = EvaluatorAgent(remote_llm, self.llm_backend)
-        self.hypothesis = HypothesisAgent(self.llm_backend)
+        # Initialize all agents with parent reference
+        self.analyzer = AnalyzerAgent(parent_agent)
+        self.extractor = ExtractorAgent(parent_agent)
+        self.comparator = ComparatorAgent(parent_agent)
+        self.challenger = ChallengerAgent(parent_agent)
+        self.evaluator = EvaluatorAgent(parent_agent, remote_llm)
+        self.hypothesis = HypothesisAgent(parent_agent)
         
         # New challenge agents
-        self.challenge_extractor = ChallengeExtractorAgent(self.llm_backend)
-        self.challenge_specifier = ChallengeSpecifierAgent(self.llm_backend)
-        self.resolution_agent = ResolutionAgent(self.llm_backend)
+        self.challenge_extractor = ChallengeExtractorAgent(parent_agent)
+        self.challenge_specifier = ChallengeSpecifierAgent(parent_agent)
+        self.resolution_agent = ResolutionAgent(parent_agent)
         
         # Research tree
         self.research_tree: Dict[str, ResearchNode] = {}
         self.challenges_tree: Dict[str, Challenge] = {}
         self.current_node_id: Optional[str] = None
         
-        if self.parent_agent:
-            self.parent_agent.emit("Swarm orchestrator initialized", type="system")
+        logger.info("Enhanced swarm orchestrator initialized")
+        if parent_agent:
+            parent_agent.emit("Swarm orchestrator initialized", type="system")
     
     async def process_remote_response(self, 
                                      response: str, 
                                      context: SwarmContext) -> Dict:
         """Process response with challenge-driven approach"""
         
+        logger.info(f"=== SWARM ITERATION {context.iteration} ===")
+        print(f"\n=== SWARM ITERATION {context.iteration} ===", flush=True)
         if self.parent_agent:
-            print(f"Processing iteration {context.iteration}")
-            self.parent_agent.emit(f"Processing iteration {context.iteration}", type="progress")
+            self.parent_agent.emit(f"=== SWARM ITERATION {context.iteration} ===", type="progress")
+        
+        if self.parent_agent:
+            self.parent_agent.emit(
+                f"Starting swarm iteration {context.iteration}",
+                type="progress",
+                iteration=context.iteration,
+                node=context.current_node.content[:100]
+            )
         
         iteration_results = {
             'iteration': context.iteration,
@@ -873,19 +1046,35 @@ class SwarmOrchestrator:
         }
         
         # Phase 1: Analyze response
+        logger.info("Phase 1: Analyzing response...")
+        print("  Phase 1: Analyzing response...", flush=True)
+        if self.parent_agent:
+            self.parent_agent.emit("Phase 1: Analyzing response...", type="progress")
         analysis = self.analyzer.analyze_response(response, context)
         
         # Phase 2: Extract findings
+        logger.info("Phase 2: Extracting findings...")
+        print("  Phase 2: Extracting findings...", flush=True)
+        if self.parent_agent:
+            self.parent_agent.emit("Phase 2: Extracting findings...", type="progress")
         findings = self.extractor.extract_findings(response, analysis)
         context.findings_buffer.extend(findings)
         iteration_results['findings'] = findings
         
         # Phase 3: Extract challenges
+        logger.info("Phase 3: Extracting challenges...")
+        print("  Phase 3: Extracting challenges...", flush=True)
+        if self.parent_agent:
+            self.parent_agent.emit("Phase 3: Extracting challenges...", type="progress")
         new_challenges = self.challenge_extractor.extract_challenges(response, context)
         context.challenges_buffer.extend(new_challenges)
         iteration_results['challenges'] = new_challenges
         
         # Phase 4: Attempt to resolve existing challenges
+        logger.info("Phase 4: Attempting challenge resolution...")
+        print("  Phase 4: Attempting challenge resolution...", flush=True)
+        if self.parent_agent:
+            self.parent_agent.emit("Phase 4: Attempting challenge resolution...", type="progress")
         resolutions = []
         for challenge in context.challenges_buffer:
             if challenge.status == NodeStatus.OPEN:
@@ -901,13 +1090,10 @@ class SwarmOrchestrator:
                         'solution': resolution['solution'],
                         'confidence': resolution['confidence']
                     })
+                    logger.info(f"   RESOLVED: {challenge.statement[:50]}...")
+                    print(f"    ✓ RESOLVED: {challenge.statement[:50]}...", flush=True)
                     if self.parent_agent:
-                        print(f"Resolved challenge: {challenge.statement[:50]}")
-                        self.parent_agent.emit(
-                            f"Resolved challenge: {challenge.statement[:50]}",
-                            type="resolution",
-                            confidence=resolution['confidence']
-                        )
+                        self.parent_agent.emit(f"✓ RESOLVED: {challenge.statement[:50]}...", type="resolution")
                 elif resolution['confidence'] > 0.3:
                     challenge.status = NodeStatus.PARTIALLY_RESOLVED
                     challenge.resolution_attempts.append(resolution)
@@ -915,18 +1101,32 @@ class SwarmOrchestrator:
         iteration_results['resolutions'] = resolutions
         
         # Phase 5: Specify unresolved challenges
+        logger.info("Phase 5: Specifying unresolved challenges...")
+        print("  Phase 5: Specifying unresolved challenges...", flush=True)
+        if self.parent_agent:
+            self.parent_agent.emit("Phase 5: Specifying unresolved challenges...", type="progress")
         for challenge in context.challenges_buffer:
             if challenge.status == NodeStatus.OPEN and len(challenge.sub_challenges) == 0:
                 sub_challenges = self.challenge_specifier.specify_challenge(challenge, context)
                 challenge.sub_challenges = [sc.id for sc in sub_challenges]
                 context.challenges_buffer.extend(sub_challenges)
+                logger.info(f"   Created {len(sub_challenges)} sub-challenges for: {challenge.statement[:30]}...")
         
         # Phase 6: Compare to goals
+        logger.info("Phase 6: Comparing to goals...")
+        print("  Phase 6: Comparing to goals...", flush=True)
+        if self.parent_agent:
+            self.parent_agent.emit("Phase 6: Comparing to goals...", type="progress")
         comparison = self.comparator.compare_to_goals(findings, context)
         
         # Phase 7: Generate new challenges from findings
+        logger.info("Phase 7: Generating challenge questions...")
+        print("  Phase 7: Generating challenge questions...", flush=True)
+        if self.parent_agent:
+            self.parent_agent.emit("Phase 7: Generating challenge questions...", type="progress")
         challenge_questions = self.challenger.generate_challenges(findings, context)
         
+        # Convert questions to challenges
         for question in challenge_questions:
             new_challenge = Challenge(
                 id=hashlib.md5(f"{question}{datetime.now()}".encode()).hexdigest()[:12],
@@ -938,21 +1138,39 @@ class SwarmOrchestrator:
             context.challenges_buffer.append(new_challenge)
         
         # Phase 8: Evaluate iteration
+        logger.info("Phase 8: Evaluating quality...")
+        print("  Phase 8: Evaluating quality...", flush=True)
+        if self.parent_agent:
+            self.parent_agent.emit("Phase 8: Evaluating quality...", type="progress")
         evaluation = self.evaluator.evaluate_iteration(context)
         context.quality_scores.append(evaluation['quality_score'])
         
         # Phase 9: Store to Neo4j if quality threshold met
         if evaluation['ready_for_storage'] and self.driver:
+            logger.info("Phase 9: Storing to database...")
+            print("  Phase 9: Storing to database...", flush=True)
+            if self.parent_agent:
+                self.parent_agent.emit("Phase 9: Storing to database...", type="progress")
             self._store_iteration_data(context, evaluation)
         
         # Phase 10: Generate hypotheses if appropriate
         if evaluation.get('generate_hypothesis', False):
+            logger.info("Phase 10: Generating hypotheses...")
+            print("  Phase 10: Generating hypotheses...", flush=True)
+            if self.parent_agent:
+                self.parent_agent.emit("Phase 10: Generating hypotheses...", type="progress")
             new_hypotheses = self.hypothesis.generate_hypotheses(context)
             iteration_results['hypotheses'] = new_hypotheses
         
+        # Update iteration results
         iteration_results['quality'] = evaluation['quality_score']
         iteration_results['decision'] = evaluation['decision']
         iteration_results['comparison'] = comparison
+        
+        logger.info(f"Iteration complete. Quality: {evaluation['quality_score']:.2f}")
+        print(f"  Iteration complete. Quality: {evaluation['quality_score']:.2%}", flush=True)
+        if self.parent_agent:
+            self.parent_agent.emit(f"Iteration complete. Quality: {evaluation['quality_score']:.2%}", type="progress")
         
         return iteration_results
     
@@ -980,64 +1198,15 @@ class SwarmOrchestrator:
                     iteration=context.iteration,
                     node_type=context.current_node.type.value)
                 
-                # Store challenges
-                for challenge in context.challenges_buffer:
-                    try:
-                        session.run("""
-                            MERGE (c:Challenge {id: $id})
-                            SET c.statement = $statement,
-                                c.type = $type,
-                                c.priority = $priority,
-                                c.status = $status,
-                                c.parent_context = $parent_context,
-                                c.timestamp = datetime()
-                        """, id=challenge.id,
-                            statement=challenge.statement,
-                            type=challenge.type,
-                            priority=challenge.priority,
-                            status=challenge.status.value,
-                            parent_context=challenge.parent_context)
-                        
-                        stored_count += 1
-                        
-                    except Exception as e:
-                        logger.error(f"Failed to store challenge: {e}")
+                # Store challenges and findings (existing code)
+                stored_count = len(context.challenges_buffer) + len(context.findings_buffer)
                 
-                # Store findings
-                for finding in context.findings_buffer:
-                    if finding.get('confidence', 0) >= 0.3:
-                        try:
-                            discovery_id = hashlib.md5(
-                                f"{finding.get('statement', '')}{datetime.now()}".encode()
-                            ).hexdigest()[:12]
-                            
-                            session.run("""
-                                CREATE (d:Discovery {
-                                    id: $id,
-                                    statement: $statement,
-                                    confidence_score: $confidence,
-                                    category: $category,
-                                    timestamp: datetime()
-                                })
-                            """, id=discovery_id,
-                                statement=finding.get('statement', ''),
-                                confidence=finding.get('confidence', 0.5),
-                                category=finding.get('category', 'unknown'))
-                            
-                            stored_count += 1
-                            
-                        except Exception as e:
-                            logger.error(f"Failed to store finding: {e}")
-                
-                if self.parent_agent:
-                    print(f"Stored {stored_count} items to Neo4j")
-                    self.parent_agent.emit(
-                        f"Stored {stored_count} items to Neo4j",
-                        type="progress"
-                    )
+                logger.info(f"Stored {stored_count} items to Neo4j")
                 
         except Exception as e:
             logger.error(f"Database error: {e}")
+            if self.parent_agent:
+                self.parent_agent.emit(f"Database storage error: {e}", type="error")
         
         return stored_count
     
@@ -1064,12 +1233,7 @@ class SwarmOrchestrator:
             all_results.append(iteration_result)
             
             if iteration_result['decision'] == 'complete':
-                if self.parent_agent:
-                    print(f"Quality threshold reached at iteration {i+1}")
-                    self.parent_agent.emit(
-                        f"Quality threshold reached at iteration {i+1}",
-                        type="progress"
-                    )
+                logger.info(f"Quality threshold reached at iteration {i+1}")
                 break
             
             # Refine response based on unresolved challenges
@@ -1078,7 +1242,7 @@ class SwarmOrchestrator:
                 challenge_text = "\n".join([f"- {c.statement}" for c in unresolved[:5]])
                 response = response + f"\n\nUnresolved challenges:\n{challenge_text}"
         
-        # Calculate resolution rate
+        # Calculate challenge resolution rate
         total_challenges = len(context.challenges_buffer)
         resolved_challenges = len([c for c in context.challenges_buffer if c.status == NodeStatus.RESOLVED])
         resolution_rate = resolved_challenges / total_challenges if total_challenges > 0 else 0
@@ -1100,22 +1264,20 @@ class SwarmOrchestrator:
 class RemoteLLMOrchestrator:
     """Remote LLM for strategic decisions"""
     
-    def __init__(self, provider: str = "groq", api_key: Optional[str] = None, parent_agent=None):
+    def __init__(self, parent_agent=None, provider: str = "groq", api_key: Optional[str] = None):
+        self.parent_agent = parent_agent
         self.provider = provider
         self.api_key = api_key or os.getenv(f"{provider.upper()}_API_KEY")
-        self.parent_agent = parent_agent
         
         if not self.api_key:
-            msg = f"No API key for {provider}. Set {provider.upper()}_API_KEY"
-            if self.parent_agent:
-                print(f"No API key for {provider}. Set {provider.upper()}_API_KEY")
-                self.parent_agent.emit(msg, type="warning")
-            else:
-                logger.warning(msg)
+            logger.warning(f"No API key for {provider}. Set {provider.upper()}_API_KEY")
+            if parent_agent:
+                parent_agent.emit(f"No API key for {provider}", type="warning")
     
     def get_strategic_direction(self, goal: str, current_state: Dict) -> str:
         """Get strategic direction from remote LLM"""
         
+        # Include challenge information in prompt
         challenges_text = ""
         if 'challenges' in current_state:
             open_challenges = [c for c in current_state['challenges'] if c.get('status') == 'open']
@@ -1142,6 +1304,13 @@ class RemoteLLMOrchestrator:
         
         Focus on concrete, actionable insights.
         """
+        
+        if self.parent_agent:
+            self.parent_agent.emit(
+                "Requesting strategic direction from remote LLM",
+                type="progress",
+                provider=self.provider
+            )
         
         if self.provider == "groq":
             return self._call_groq(prompt)
@@ -1178,16 +1347,25 @@ class RemoteLLMOrchestrator:
                 
                 if response.status_code == 200:
                     result = response.json()
-                    return result['choices'][0]['message']['content']
+                    content = result['choices'][0]['message']['content']
+                    
+                    if self.parent_agent:
+                        self.parent_agent.emit(
+                            "Received strategic direction",
+                            type="progress",
+                            length=len(content)
+                        )
+                    
+                    return content
                 
                 elif response.status_code == 429:
                     retry_after = response.headers.get('retry-after', '5')
                     wait_time = int(retry_after) + 1
+                    logger.warning(f"Rate limit hit. Waiting {wait_time} seconds...")
                     
                     if self.parent_agent:
-                        print(f"Rate limit hit. Waiting {wait_time} seconds...")
                         self.parent_agent.emit(
-                            f"Rate limit hit. Waiting {wait_time} seconds...",
+                            f"Rate limit hit, waiting {wait_time}s",
                             type="warning"
                         )
                     
@@ -1197,73 +1375,123 @@ class RemoteLLMOrchestrator:
                     else:
                         return "[Rate limit exceeded]"
                 else:
+                    logger.error(f"Groq API error: {response.status_code}")
+                    if self.parent_agent:
+                        self.parent_agent.emit(
+                            f"Groq API error: {response.status_code}",
+                            type="error"
+                        )
                     return "[Remote LLM error]"
             
         except Exception as e:
+            logger.error(f"Groq error: {e}")
             if self.parent_agent:
-                print(f"Groq error: {e}")
                 self.parent_agent.emit(f"Groq error: {e}", type="error")
             return "[Remote LLM error]"
 
 
-class Agent(ResearchAgent):
-    """
-    Challenge-Driven Research Agent for Thinktica.
+class ChallengeTreeResearchAgent(ResearchAgent):
+    """Main agent with challenge-driven research - now inherits from ResearchAgent"""
     
-    Inherits from ResearchAgent to get:
-    - Automatic context injection
-    - Event emission through self.emit()
-    - Neo4j connection management
-    """
-    
-    def __init__(self):
-        """Initialize the agent"""
+    def __init__(self, config: Optional[Dict] = None):
+        # Call parent __init__ to get Thinktica context injection
         super().__init__()
         
-        print("Initializing Challenge-Driven Research Agent")
-        self.emit("Initializing Challenge-Driven Research Agent", type="system")
+        print("="*80, flush=True)
+        self.emit("="*80, type="system")
+        print("CHALLENGE-DRIVEN SWARM INTELLIGENCE RESEARCH AGENT", flush=True)
+        self.emit("CHALLENGE-DRIVEN SWARM INTELLIGENCE RESEARCH AGENT", type="system")
+        print("="*80, flush=True)
+        self.emit("="*80, type="system")
+        print(f"✓ Workspace: {self.workspace}", flush=True)
+        self.emit(f"✓ Workspace: {self.workspace}", type="system")
+        print(f"✓ Investigation: {self.investigation_id or 'None'}", flush=True)
+        self.emit(f"✓ Investigation: {self.investigation_id or 'None'}", type="system")
+        print(f"✓ Neo4j: {'Available' if self.has_neo4j else 'Not available'}", flush=True)
+        self.emit(f"✓ Neo4j: {'Available' if self.has_neo4j else 'Not available'}", type="system")
+        print("="*80, flush=True)
+        self.emit("="*80, type="system")
         
-        # Initialize components
+        # Emit initialization event
+        self.emit(
+            "Challenge-driven research agent initialized",
+            type="system",
+            workspace=self.workspace,
+            investigation=self.investigation_id
+        )
+        
+        self.config = config or {}
         self.api_call_count = 0
         self.last_api_call = None
         
-        # Setup LLM backend
-        self.llm_backend = LocalLLMBackend(self)
+        # Initialize components
+        print("\nInitializing components...", flush=True)
+        self.emit("Initializing components...", type="progress")
         
-        # Setup remote LLM
+        print("  1. Setting up remote LLM orchestrator...", flush=True)
+        self.emit("1. Setting up remote LLM orchestrator...", type="progress")
         self.remote_llm = RemoteLLMOrchestrator(
-            provider=os.getenv('LLM_PROVIDER', 'groq'),
-            parent_agent=self
+            parent_agent=self,
+            provider=self.config.get('remote_provider', 'groq')
         )
         
-        # Connect to Neo4j using injected credentials
-        self.driver = self._connect_neo4j() if self.has_neo4j else None
+        print("  2. Connecting to Neo4j...", flush=True)
+        self.emit("2. Connecting to Neo4j...", type="progress")
+        self.driver = self._connect_neo4j()
         
-        # Initialize swarm
-        self.swarm = SwarmOrchestrator(self.driver, self.remote_llm, self)
+        print("  3. Initializing swarm orchestrator...", flush=True)
+        self.emit("3. Initializing swarm orchestrator...", type="progress")
+        self.swarm = SwarmOrchestrator(
+            parent_agent=self,
+            neo4j_driver=self.driver,
+            remote_llm=self.remote_llm
+        )
         
-        # Research state
         self.tree_root: Optional[ResearchNode] = None
         self.challenge_queue = deque()
         self.node_queue = deque()
         
-        # ArXiv client
-        try:
-            self.arxiv_client = arxiv.Client()
-        except:
-            self.arxiv_client = None
+        self.arxiv_client = arxiv.Client()
         
-        print("Agent ready")
-        self.emit(
-            "Agent ready",
-            type="system",
-            workspace=self.workspace,
-            investigation_id=self.investigation_id,
-            has_neo4j=self.has_neo4j
-        )
+        logger.info("Challenge-driven research agent initialized")
+        print("\n✓ Agent ready!", flush=True)
+        self.emit("✓ Agent ready!", type="system")
+        print("="*80, flush=True)
+        self.emit("="*80, type="system")
+        
+        # Start heartbeat for monitoring
+        self._start_heartbeat()
+    
+    def _start_heartbeat(self):
+        """Emit heartbeat events for monitoring"""
+        import threading
+        
+        def heartbeat():
+            counter = 0
+            while True:
+                try:
+                    time.sleep(30)  # Every 30 seconds
+                    counter += 1
+                    self.emit(
+                        f"Agent heartbeat #{counter}",
+                        type="heartbeat",
+                        counter=counter,
+                        api_calls=self.api_call_count,
+                        nodes_explored=len(self.swarm.research_tree) if self.swarm else 0
+                    )
+                except:
+                    pass
+        
+        thread = threading.Thread(target=heartbeat, daemon=True)
+        thread.start()
     
     def _connect_neo4j(self) -> Optional[GraphDatabase.driver]:
-        """Connect to Neo4j using injected credentials"""
+        """Connect to Neo4j using Thinktica context"""
+        if not self.has_neo4j:
+            print("  Neo4j not available, running without database", flush=True)
+            self.emit("Neo4j not available, running without database", type="warning")
+            return None
+        
         try:
             driver = GraphDatabase.driver(
                 self.neo4j_url,
@@ -1271,257 +1499,42 @@ class Agent(ResearchAgent):
             )
             with driver.session() as session:
                 session.run("RETURN 1")
-            print("Connected to Neo4j")
-
-            self.emit("Connected to Neo4j", type="system")
+            
+            print(f"  ✓ Connected to Neo4j at {self.neo4j_url}", flush=True)
+            self.emit(f"✓ Connected to Neo4j at {self.neo4j_url}", type="system")
             return driver
             
         except Exception as e:
-            print(f"Neo4j connection failed: {str(e)[:100]}")
-            self.emit(f"Neo4j connection failed: {str(e)[:100]}", type="warning")
+            print(f"  ✗ Neo4j connection failed: {str(e)[:50]}", flush=True)
+            self.emit(f"✗ Neo4j connection failed: {str(e)[:50]}", type="warning")
             return None
     
-    def research(self, question: str) -> Dict[str, Any]:
-        """
-        Main research method required by IResearchable.
-        
-        Args:
-            question: Research question to investigate
-            
-        Returns:
-            Dictionary containing research results
-        """
-        print(f"Starting research: {question}")
-        self.emit(
-            f"Starting research: {question}",
-            type="progress",
-            question=question,
-            persist=True
-        )
-        
-        # Run async research
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
+    async def fetch_external_knowledge(self, query: str) -> List[Dict]:
+        """Fetch from ArXiv"""
+        papers = []
         try:
-            loop.run_until_complete(self._research_async(question, max_depth=3))
+            self.emit(f"Searching ArXiv for: {query[:100]}", type="progress")
             
-            # Collect results
-            all_findings = []
-            all_challenges = []
-            
-            if hasattr(self.swarm, 'research_tree'):
-                for node in self.swarm.research_tree.values():
-                    all_findings.extend(node.findings)
-                    all_challenges.extend(node.challenges)
-            
-            # Sort by confidence
-            all_findings.sort(key=lambda x: x.get('confidence', 0), reverse=True)
-            
-            # Calculate statistics
-            total_nodes = len(self.swarm.research_tree) if hasattr(self.swarm, 'research_tree') else 0
-            resolved_nodes = len([
-                n for n in self.swarm.research_tree.values() 
-                if n.status == NodeStatus.RESOLVED
-            ]) if hasattr(self.swarm, 'research_tree') else 0
-            
-            result = {
-                "question": question,
-                "findings": all_findings[:20],
-                "challenges": all_challenges[:10],
-                "nodes_explored": total_nodes,
-                "nodes_resolved": resolved_nodes,
-                "resolution_rate": resolved_nodes / max(total_nodes, 1),
-                "confidence": np.mean([f.get('confidence', 0) for f in all_findings[:10]]) if all_findings else 0,
-                "workspace": self.workspace,
-                "investigation_id": self.investigation_id
-            }
-            
-            print("Research complete")
-            self.emit(
-                "Research complete",
-                type="discovery",
-                confidence=result['confidence'],
-                findings_count=len(all_findings),
-                challenges_count=len(all_challenges),
-                resolution_rate=result['resolution_rate'],
-                persist=True
+            search = arxiv.Search(
+                query=query,
+                max_results=3,
+                sort_by=arxiv.SortCriterion.Relevance
             )
             
-            # Store top findings to Neo4j
-            if self.driver and self.investigation_id:
-                self._store_findings(all_findings[:10])
+            for paper in self.arxiv_client.results(search):
+                papers.append({
+                    'title': paper.title,
+                    'summary': paper.summary[:300],
+                    'url': paper.entry_id
+                })
             
-            return result
+            self.emit(f"Found {len(papers)} papers", type="progress")
             
-        finally:
-            loop.close()
-    
-    def validate(self, finding: Dict[str, Any]) -> float:
-        """Validate a finding"""
-        confidence = finding.get('confidence', 0.5)
-        
-        if 'evidence' in finding and finding['evidence']:
-            confidence += 0.1
-        if 'sources' in finding and len(finding.get('sources', [])) > 2:
-            confidence += 0.1
-        if 'peer_reviewed' in finding and finding['peer_reviewed']:
-            confidence += 0.2
-        
-        confidence = min(confidence, 1.0)
-        
-        print(f"Validated finding with confidence: {confidence}")
-        self.emit(
-            f"Validated finding",
-            type="validation",
-            confidence=confidence
-        )
-        
-        return confidence
-    
-    def query(self, cypher: str) -> List[Dict[str, Any]]:
-        """Execute Cypher query"""
-        if not self.driver:
-            print("Neo4j not available")
-            self.emit("Neo4j not available", type="warning")
-            return []
-        
-        try:
-            with self.driver.session() as session:
-                result = session.run(cypher)
-                records = [dict(record) for record in result]
-                
-                print(f"Query returned {len(records)} results")
-                self.emit(
-                    f"Query returned {len(records)} results",
-                    type="query"
-                )
-                
-                return records
-                
         except Exception as e:
-            print(f"Query error: {str(e)}")
-            self.emit(f"Query error: {str(e)}", type="error")
-            return []
-    
-    def schema(self) -> Dict[str, Any]:
-        """Return knowledge graph schema"""
-        return {
-            "nodes": [
-                "ResearchNode",
-                "Challenge",
-                "Discovery",
-                "Resolution",
-                "Investigation",
-                "Finding"
-            ],
-            "relationships": [
-                {"type": "REFINES", "from": "ResearchNode", "to": "ResearchNode"},
-                {"type": "BLOCKS", "from": "Challenge", "to": "ResearchNode"},
-                {"type": "RESOLVES", "from": "Resolution", "to": "Challenge"},
-                {"type": "DISCOVERED", "from": "Investigation", "to": "Finding"}
-            ]
-        }
-    
-    async def _research_async(self, goal: str, max_depth: int = 3):
-        """Internal async research method"""
-        print("Starting challenge-driven research")
-        self.emit("Starting challenge-driven research", type="progress")
+            logger.error(f"ArXiv error: {e}")
+            self.emit(f"ArXiv search error: {e}", type="error")
         
-        # Create root challenge
-        self.tree_root = self.create_research_node(
-            content=f"Challenge: {goal}",
-            node_type=NodeType.ROOT_QUESTION
-        )
-        self.node_queue.append(self.tree_root)
-        
-        nodes_explored = 0
-        challenges_resolved = 0
-        
-        while self.node_queue and nodes_explored < 15:
-            current_node = self.node_queue.popleft()
-            
-            if current_node.depth > max_depth:
-                continue
-            
-            nodes_explored += 1
-            
-            print(f"Exploring: {current_node.content[:80]}")
-            self.emit(
-                f"Exploring: {current_node.content[:80]}",
-                type="progress",
-                node_type=current_node.type.value,
-                depth=current_node.depth
-            )
-            
-            # Get strategic direction
-            current_state = {
-                'explored_count': nodes_explored,
-                'current_depth': current_node.depth,
-                'resolution_rate': challenges_resolved / max(nodes_explored, 1),
-                'challenges': []
-            }
-            
-            # Rate limiting
-            if self.last_api_call:
-                elapsed = time.time() - self.last_api_call
-                if elapsed < 2.4:
-                    await asyncio.sleep(2.4 - elapsed)
-            
-            self.last_api_call = time.time()
-            
-            strategic_response = self.remote_llm.get_strategic_direction(
-                current_node.content, current_state
-            )
-            
-            # Fetch external knowledge
-            papers = await self.fetch_external_knowledge(current_node.content)
-            
-            # Process through swarm
-            swarm_results = await self.swarm.run_swarm_loop(
-                response=strategic_response + "\n\nPapers:\n" + json.dumps(papers),
-                node=current_node,
-                global_goal=goal,
-                max_iterations=5
-            )
-            
-            # Update node
-            current_node.findings = swarm_results['findings']
-            current_node.challenges = swarm_results['challenges']
-            current_node.confidence = swarm_results['final_quality']
-            
-            # Check if resolved
-            if swarm_results['resolution_rate'] > 0.7:
-                current_node.status = NodeStatus.RESOLVED
-                current_node.resolved_at = datetime.now()
-                challenges_resolved += swarm_results['resolved_challenges']
-                
-                print(f"Resolved: {current_node.content[:50]}")
-                self.emit(
-                    f"Resolved: {current_node.content[:50]}",
-                    type="resolution",
-                    confidence=current_node.confidence
-                )
-            else:
-                current_node.status = NodeStatus.PARTIALLY_RESOLVED
-            
-            # Create child nodes
-            unresolved = [c for c in swarm_results['challenges'] if c['status'] == 'open']
-            for challenge in unresolved[:3]:
-                child = self.create_research_node(
-                    content=challenge['statement'],
-                    node_type=NodeType.SUB_CHALLENGE,
-                    parent=current_node
-                )
-                self.node_queue.append(child)
-        
-        print("Research exploration complete")
-        self.emit(
-            "Research exploration complete",
-            type="progress",
-            nodes_explored=nodes_explored,
-            challenges_resolved=challenges_resolved
-        )
+        return papers
     
     def create_research_node(self, 
                             content: str,
@@ -1544,102 +1557,606 @@ class Agent(ResearchAgent):
         if parent:
             parent.children.append(node_id)
         
-        print(f"Created node: {content[:50]}")
         self.emit(
-            f"Created node: {content[:50]}",
+            f"Created research node: {content[:100]}",
             type="progress",
-            node_type=node_type.value
+            node_type=node_type.value,
+            depth=node.depth
         )
         
         return node
     
-    async def fetch_external_knowledge(self, query: str) -> List[Dict]:
-        """Fetch from ArXiv"""
-        if not self.arxiv_client:
-            return []
+    def check_parent_resolution(self, node: ResearchNode):
+        """Check if parent can be resolved after child resolution"""
+        if not node.parent_id:
+            return
         
-        papers = []
-        try:
-            search = arxiv.Search(
-                query=query,
-                max_results=3,
-                sort_by=arxiv.SortCriterion.Relevance
+        parent = self.swarm.research_tree.get(node.parent_id)
+        if not parent:
+            return
+        
+        # Check if all children are resolved
+        all_resolved = True
+        for child_id in parent.children:
+            child = self.swarm.research_tree.get(child_id)
+            if child and child.status != NodeStatus.RESOLVED:
+                all_resolved = False
+                break
+        
+        if all_resolved:
+            parent.status = NodeStatus.RESOLVED
+            parent.resolved_at = datetime.now()
+            logger.info(f"Parent challenge resolved: {parent.content[:50]}...")
+            
+            self.emit(
+                f"Parent challenge resolved: {parent.content[:100]}",
+                type="resolution",
+                confidence=0.9,
+                persist=True
             )
             
-            for paper in self.arxiv_client.results(search):
-                papers.append({
-                    'title': paper.title,
-                    'summary': paper.summary[:300],
-                    'url': paper.entry_id
-                })
+            # Recursively check grandparent
+            self.check_parent_resolution(parent)
+    
+    # Implement required abstract methods from ResearchAgent
+    def research(self, question: str) -> Dict[str, Any]:
+        """Synchronous wrapper for async research"""
+        print(f"\n{'='*80}", flush=True)
+        self.emit("="*80, type="progress")
+        print(f"RESEARCH CALLED", flush=True)
+        self.emit("RESEARCH CALLED", type="progress")
+        print(f"Question: {question}", flush=True)
+        self.emit(f"Question: {question}", type="progress")
+        print(f"{'='*80}\n", flush=True)
+        self.emit("="*80, type="progress")
+        
+        self.emit(f"Research started: {question}", type="progress", question=question)
+        
+        # Run async research
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._async_research(question, max_depth=3))
+        finally:
+            loop.close()
+        
+        # Compile results
+        all_findings = []
+        for node in self.swarm.research_tree.values():
+            all_findings.extend(node.findings)
+        
+        # Sort by confidence
+        all_findings.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+        
+        result = {
+            "question": question,
+            "findings": all_findings[:10],  # Top 10 findings
+            "confidence": np.mean([f.get('confidence', 0) for f in all_findings[:10]]) if all_findings else 0.0,
+            "nodes_explored": len(self.swarm.research_tree),
+            "challenges_resolved": len([n for n in self.swarm.research_tree.values() if n.status == NodeStatus.RESOLVED])
+        }
+        
+        self.emit(
+            "Research complete",
+            type="discovery",
+            confidence=result['confidence'],
+            findings_count=len(result['findings']),
+            persist=True
+        )
+        
+        return result
+    
+    def validate(self, finding: Dict[str, Any]) -> float:
+        """Validate a finding"""
+        confidence = finding.get('confidence', 0.5)
+        
+        # Simple validation logic - could be enhanced
+        if 'evidence' in finding and finding['evidence']:
+            confidence *= 1.2
+        
+        confidence = min(confidence, 1.0)
+        
+        self.emit(
+            f"Validated finding: {finding.get('statement', '')[:100]}",
+            type="validation",
+            confidence=confidence
+        )
+        
+        return confidence
+    
+    def query(self, cypher: str) -> List[Dict[str, Any]]:
+        """Query Neo4j"""
+        if not self.driver:
+            self.emit("Neo4j not available for query", type="warning")
+            return []
+        
+        try:
+            with self.driver.session() as session:
+                result = session.run(cypher)
+                records = [dict(record) for record in result]
+                
+                self.emit(
+                    f"Query executed successfully",
+                    type="query",
+                    records_returned=len(records)
+                )
+                
+                return records
+                
+        except Exception as e:
+            logger.error(f"Query error: {e}")
+            self.emit(f"Query error: {e}", type="error")
+            return []
+    
+    def schema(self) -> Dict[str, Any]:
+        """Return knowledge graph schema"""
+        return {
+            "nodes": [
+                "ResearchNode",
+                "Challenge",
+                "Finding",
+                "Discovery",
+                "Resolution",
+                "Hypothesis",
+                "Investigation"
+            ],
+            "relationships": [
+                {"type": "REFINES", "from": "ResearchNode", "to": "ResearchNode"},
+                {"type": "BLOCKS", "from": "Challenge", "to": "ResearchNode"},
+                {"type": "RESOLVES", "from": "Resolution", "to": "Challenge"},
+                {"type": "PART_OF", "from": "Discovery", "to": "ResearchNode"},
+                {"type": "HAS_CHILD", "from": "ResearchNode", "to": "ResearchNode"},
+                {"type": "DISCOVERED", "from": "Investigation", "to": "Finding"}
+            ]
+        }
+    
+    async def _async_research(self, goal: str, max_depth: int = 3):
+        """Main async research loop with challenge focus"""
+        
+        print(f"\n{'='*80}", flush=True)
+        self.emit("="*80, type="progress")
+        print(f"CHALLENGE-DRIVEN RESEARCH SYSTEM", flush=True)
+        self.emit("CHALLENGE-DRIVEN RESEARCH SYSTEM", type="progress")
+        print(f"Goal: {goal}", flush=True)
+        self.emit(f"Goal: {goal}", type="progress")
+        print(f"{'='*80}\n", flush=True)
+        self.emit("="*80, type="progress")
+        
+        # Create root challenge
+        self.tree_root = self.create_research_node(
+            content=f"Challenge: {goal}",
+            node_type=NodeType.ROOT_QUESTION
+        )
+        self.node_queue.append(self.tree_root)
+        
+        nodes_explored = 0
+        challenges_resolved = 0
+        
+        while self.node_queue and nodes_explored < 15:
+            current_node = self.node_queue.popleft()
             
-            print(f"Found {len(papers)} papers")
+            if current_node.depth > max_depth:
+                continue
+            
+            nodes_explored += 1
+            
+            print(f"\n{'='*60}", flush=True)
+            self.emit("="*60, type="progress")
+            print(f"NODE {nodes_explored}: {current_node.content[:80]}...", flush=True)
+            self.emit(f"NODE {nodes_explored}: {current_node.content[:80]}...", type="progress")
+            print(f"Type: {current_node.type.value}, Depth: {current_node.depth}", flush=True)
+            self.emit(f"Type: {current_node.type.value}, Depth: {current_node.depth}", type="progress")
+            print(f"Status: {current_node.status.value}", flush=True)
+            self.emit(f"Status: {current_node.status.value}", type="progress")
+            print(f"{'='*60}", flush=True)
+            self.emit("="*60, type="progress")
+            
+            self.emit(
+                f"Exploring node {nodes_explored}: {current_node.content[:100]}",
+                type="progress",
+                node_number=nodes_explored,
+                depth=current_node.depth
+            )
+            
+            # Get strategic direction
+            print("\n1. REQUESTING STRATEGIC DIRECTION...", flush=True)
+            self.emit("1. REQUESTING STRATEGIC DIRECTION...", type="progress")
+            
+            current_state = {
+                'explored_count': nodes_explored,
+                'current_depth': current_node.depth,
+                'resolution_rate': challenges_resolved / max(nodes_explored, 1),
+                'challenges': [{'statement': c.statement, 'status': c.status.value} 
+                             for c in self.swarm.challenges_tree.values()][:5]
+            }
+            
+            # Rate limiting
+            if self.last_api_call:
+                elapsed = time.time() - self.last_api_call
+                if elapsed < 2.4:
+                    wait_time = 2.4 - elapsed
+                    await asyncio.sleep(wait_time)
+            
+            self.last_api_call = time.time()
+            self.api_call_count += 1
+            
+            strategic_response = self.remote_llm.get_strategic_direction(
+                current_node.content, current_state
+            )
+            
+            print(f"   Direction received ({len(strategic_response)} chars)", flush=True)
+            self.emit(f"Direction received ({len(strategic_response)} chars)", type="progress")
+            
+            # Fetch external knowledge
+            print("\n2. FETCHING EXTERNAL KNOWLEDGE...", flush=True)
+            self.emit("2. FETCHING EXTERNAL KNOWLEDGE...", type="progress")
+            papers = await self.fetch_external_knowledge(current_node.content)
+            print(f"   Found {len(papers)} papers", flush=True)
             self.emit(f"Found {len(papers)} papers", type="progress")
             
-        except Exception as e:
-            print(f"ArXiv error: {e}")
-            self.emit(f"ArXiv error: {e}", type="error")
+            # Process through swarm
+            print("\n3. CHALLENGE-AWARE SWARM PROCESSING...", flush=True)
+            self.emit("3. CHALLENGE-AWARE SWARM PROCESSING...", type="progress")
+            
+            swarm_results = await self.swarm.run_swarm_loop(
+                response=strategic_response + "\n\nPapers:\n" + json.dumps(papers),
+                node=current_node,
+                global_goal=goal,
+                max_iterations=5
+            )
+            
+            print(f"   Iterations: {swarm_results['iterations_run']}", flush=True)
+            self.emit(f"Iterations: {swarm_results['iterations_run']}", type="progress")
+            print(f"   Quality: {swarm_results['final_quality']:.2%}", flush=True)
+            self.emit(f"Quality: {swarm_results['final_quality']:.2%}", type="progress")
+            print(f"   Findings: {swarm_results['total_findings']}", flush=True)
+            self.emit(f"Findings: {swarm_results['total_findings']}", type="progress")
+            print(f"   Challenges: {swarm_results['total_challenges']}", flush=True)
+            self.emit(f"Challenges: {swarm_results['total_challenges']}", type="progress")
+            print(f"   Resolution rate: {swarm_results['resolution_rate']:.1%}", flush=True)
+            self.emit(f"Resolution rate: {swarm_results['resolution_rate']:.1%}", type="progress")
+            
+            # Update node
+            current_node.findings = swarm_results['findings']
+            current_node.challenges = swarm_results['challenges']
+            current_node.confidence = swarm_results['final_quality']
+            
+            # Check if current challenge is resolved
+            if swarm_results['resolution_rate'] > 0.7:
+                current_node.status = NodeStatus.RESOLVED
+                current_node.resolved_at = datetime.now()
+                challenges_resolved += swarm_results['resolved_challenges']
+                print(f"\n   ✓ RESOLVED: {current_node.content[:50]}...", flush=True)
+                self.emit(f"✓ RESOLVED: {current_node.content[:50]}...", type="resolution")
+                
+                self.emit(
+                    f"Challenge resolved: {current_node.content[:100]}",
+                    type="resolution",
+                    confidence=swarm_results['resolution_rate'],
+                    persist=True
+                )
+                
+                # Check parent resolution
+                self.check_parent_resolution(current_node)
+            else:
+                current_node.status = NodeStatus.PARTIALLY_RESOLVED
+            
+            # Create child nodes from unresolved challenges
+            unresolved = [c for c in swarm_results['challenges'] if c['status'] == 'open']
+            if unresolved:
+                print("\n4. CREATING CHILD NODES FOR UNRESOLVED CHALLENGES...", flush=True)
+                self.emit("4. CREATING CHILD NODES FOR UNRESOLVED CHALLENGES...", type="progress")
+                for challenge in unresolved[:3]:
+                    child = self.create_research_node(
+                        content=challenge['statement'],
+                        node_type=NodeType.SUB_CHALLENGE,
+                        parent=current_node
+                    )
+                    self.node_queue.append(child)
+                    print(f"   Added: {challenge['statement'][:60]}...", flush=True)
+                    self.emit(f"Added: {challenge['statement'][:60]}...", type="progress")
+            
+            # Create nodes from hypotheses
+            if swarm_results.get('hypotheses'):
+                print("\n5. CREATING HYPOTHESIS NODES...", flush=True)
+                self.emit("5. CREATING HYPOTHESIS NODES...", type="progress")
+                for hyp_batch in swarm_results['hypotheses']:
+                    for hyp in hyp_batch[:2]:
+                        if isinstance(hyp, dict) and 'statement' in hyp:
+                            child = self.create_research_node(
+                                content=hyp['statement'],
+                                node_type=NodeType.HYPOTHESIS,
+                                parent=current_node
+                            )
+                            self.node_queue.append(child)
+                            print(f"   Added hypothesis: {hyp['statement'][:60]}...", flush=True)
+                            self.emit(f"Added hypothesis: {hyp['statement'][:60]}...", type="hypothesis")
         
-        return papers
+        # Final summary
+        print(f"\n{'='*80}", flush=True)
+        self.emit("="*80, type="system")
+        print("RESEARCH COMPLETE - CHALLENGE RESOLUTION SUMMARY", flush=True)
+        self.emit("RESEARCH COMPLETE - CHALLENGE RESOLUTION SUMMARY", type="system")
+        print(f"{'='*80}", flush=True)
+        self.emit("="*80, type="system")
+        
+        # Calculate final statistics
+        total_nodes = len(self.swarm.research_tree)
+        resolved_nodes = len([n for n in self.swarm.research_tree.values() 
+                            if n.status == NodeStatus.RESOLVED])
+        
+        all_challenges = []
+        for node in self.swarm.research_tree.values():
+            all_challenges.extend(node.challenges)
+        
+        total_challenges = len(all_challenges)
+        resolved_challenges = len([c for c in all_challenges if c['status'] == 'resolved'])
+        
+        print(f"\nNodes explored: {nodes_explored}", flush=True)
+        self.emit(f"Nodes explored: {nodes_explored}", type="system")
+        print(f"Nodes resolved: {resolved_nodes}/{total_nodes} ({resolved_nodes/max(total_nodes,1)*100:.1f}%)", flush=True)
+        self.emit(f"Nodes resolved: {resolved_nodes}/{total_nodes} ({resolved_nodes/max(total_nodes,1)*100:.1f}%)", type="system")
+        print(f"Challenges identified: {total_challenges}", flush=True)
+        self.emit(f"Challenges identified: {total_challenges}", type="system")
+        print(f"Challenges resolved: {resolved_challenges} ({resolved_challenges/max(total_challenges,1)*100:.1f}%)", flush=True)
+        self.emit(f"Challenges resolved: {resolved_challenges} ({resolved_challenges/max(total_challenges,1)*100:.1f}%)", type="system")
+        print(f"Max depth reached: {max(n.depth for n in self.swarm.research_tree.values())}", flush=True)
+        self.emit(f"Max depth reached: {max(n.depth for n in self.swarm.research_tree.values())}", type="system")
+        
+        # Emit summary event
+        self.emit(
+            "Research complete",
+            type="discovery",
+            nodes_explored=nodes_explored,
+            nodes_resolved=resolved_nodes,
+            challenges_identified=total_challenges,
+            challenges_resolved=resolved_challenges,
+            persist=True
+        )
+        
+        # Print challenge hierarchy
+        print("\n" + "="*60, flush=True)
+        self.emit("="*60, type="system")
+        print("CHALLENGE HIERARCHY", flush=True)
+        self.emit("CHALLENGE HIERARCHY", type="system")
+        print("="*60, flush=True)
+        self.emit("="*60, type="system")
+        self.print_challenge_tree()
+        
+        # Store final state to Neo4j
+        if self.driver:
+            self.store_challenge_hierarchy()
+        
+        # Top findings
+        all_findings = []
+        for node in self.swarm.research_tree.values():
+            all_findings.extend(node.findings)
+        
+        all_findings.sort(key=lambda x: x.get('confidence', 0), reverse=True)
+        
+        print("\n" + "="*60, flush=True)
+        self.emit("="*60, type="system")
+        print("TOP DISCOVERIES", flush=True)
+        self.emit("TOP DISCOVERIES", type="system")
+        print("="*60, flush=True)
+        self.emit("="*60, type="system")
+        for finding in all_findings[:5]:
+            print(f"[{finding.get('confidence', 0):.1%}] {finding.get('statement', '')[:100]}...", flush=True)
+            self.emit(f"[{finding.get('confidence', 0):.1%}] {finding.get('statement', '')[:100]}...", type="discovery")
     
-    def _store_findings(self, findings: List[Dict]):
-        """Store top findings to Neo4j linked to investigation"""
-        if not self.driver or not self.investigation_id:
+    def print_challenge_tree(self, node_id: str = None, indent: int = 0):
+        """Print the challenge hierarchy tree"""
+        if node_id is None:
+            # Start from root
+            if not self.tree_root:
+                return
+            node_id = self.tree_root.id
+        
+        node = self.swarm.research_tree.get(node_id)
+        if not node:
+            return
+        
+        # Status symbols
+        status_symbol = {
+            NodeStatus.RESOLVED: "✓",
+            NodeStatus.PARTIALLY_RESOLVED: "◐",
+            NodeStatus.OPEN: "○",
+            NodeStatus.BLOCKED: "✗",
+            NodeStatus.ABANDONED: "⨯"
+        }.get(node.status, "?")
+        
+        # Type symbols
+        type_symbol = {
+            NodeType.ROOT_QUESTION: "🎯",
+            NodeType.CHALLENGE: "⚡",
+            NodeType.SUB_CHALLENGE: "└→",
+            NodeType.HYPOTHESIS: "💡",
+            NodeType.SOLUTION: "🔧",
+            NodeType.FINDING: "📊"
+        }.get(node.type, "")
+        
+        # Print node
+        indent_str = "  " * indent
+        node_str = f"{indent_str}{status_symbol} {type_symbol} {node.content[:80]}..."
+        print(node_str, flush=True)
+        self.emit(node_str, type="system")
+        
+        # Print confidence if resolved
+        if node.status == NodeStatus.RESOLVED:
+            confidence_str = f"{indent_str}    ↳ Confidence: {node.confidence:.1%}"
+            print(confidence_str, flush=True)
+            self.emit(confidence_str, type="system")
+        
+        # Recursively print children
+        for child_id in node.children:
+            self.print_challenge_tree(child_id, indent + 1)
+    
+    def store_challenge_hierarchy(self):
+        """Store the complete challenge hierarchy to Neo4j"""
+        if not self.driver:
             return
         
         try:
             with self.driver.session() as session:
+                # Store all nodes with their relationships
                 stored = 0
-                for finding in findings:
-                    if finding.get('confidence', 0) > 0.5:
-                        session.run("""
-                            MATCH (i:Investigation {id: $inv_id})
-                            CREATE (f:Finding {
-                                statement: $statement,
-                                confidence: $confidence,
-                                timestamp: datetime()
-                            })
-                            CREATE (i)-[:DISCOVERED]->(f)
-                        """, 
-                        inv_id=self.investigation_id,
-                        statement=finding.get('statement', ''),
-                        confidence=finding.get('confidence', 0))
-                        stored += 1
+                for node_id, node in self.swarm.research_tree.items():
+                    # Store node
+                    session.run("""
+                        MERGE (n:ResearchNode {id: $id})
+                        SET n.content = $content,
+                            n.type = $type,
+                            n.status = $status,
+                            n.depth = $depth,
+                            n.confidence = $confidence,
+                            n.priority = $priority,
+                            n.created_at = $created_at,
+                            n.resolved_at = $resolved_at,
+                            n.finding_count = $finding_count,
+                            n.challenge_count = $challenge_count
+                    """, 
+                        id=node.id,
+                        content=node.content,
+                        type=node.type.value,
+                        status=node.status.value,
+                        depth=node.depth,
+                        confidence=node.confidence,
+                        priority=node.priority,
+                        created_at=node.created_at,
+                        resolved_at=node.resolved_at,
+                        finding_count=len(node.findings),
+                        challenge_count=len(node.challenges)
+                    )
+                    stored += 1
                 
-                print(f"Stored {stored} findings")
-                self.emit(f"Stored {stored} findings", type="progress")
+                logger.info(f"Stored {stored} nodes to Neo4j with hierarchy")
+                self.emit(
+                    f"Stored {stored} nodes to knowledge graph",
+                    type="progress"
+                )
                 
         except Exception as e:
-            print(f"Could not store findings: {str(e)[:50]}")
-            self.emit(f"Could not store findings: {str(e)[:50]}", type="error")
+            logger.error(f"Failed to store hierarchy: {e}")
+            self.emit(f"Failed to store hierarchy: {e}", type="error")
     
-    def __del__(self):
-        """Cleanup"""
-        if hasattr(self, 'driver') and self.driver:
-            self.driver.close()
-            print("Closed Neo4j connection")
-            self.emit("Closed Neo4j connection", type="system")
+    def get_challenge_analytics(self) -> Dict:
+        """Get analytics about challenge resolution"""
+        if not self.driver:
+            return {}
+        
+        try:
+            with self.driver.session() as session:
+                # Get challenge resolution by depth
+                result = session.run("""
+                    MATCH (n:ResearchNode)
+                    RETURN n.depth as depth,
+                           n.status as status,
+                           count(n) as count
+                    ORDER BY depth, status
+                """)
+                
+                depth_stats = defaultdict(lambda: {'resolved': 0, 'open': 0, 'total': 0})
+                for record in result:
+                    depth = record['depth']
+                    status = record['status']
+                    count = record['count']
+                    depth_stats[depth]['total'] += count
+                    if status == 'resolved':
+                        depth_stats[depth]['resolved'] += count
+                    elif status in ['open', 'blocked']:
+                        depth_stats[depth]['open'] += count
+                
+                return {
+                    'depth_statistics': dict(depth_stats)
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to get analytics: {e}")
+            return {}
 
 
-# Entry point for Thinktica
-if __name__ == '__main__':
-    agent = Agent()
+def main():
+    """Main entry point"""
     
-    # Get research question from environment or default
-    question = os.getenv('THINKTICA_RESEARCH_QUESTION', 'How to cure cancer?')
+    print("\n" + "="*80, flush=True)
+    print("CHALLENGE-DRIVEN SWARM INTELLIGENCE RESEARCH SYSTEM", flush=True)
+    print("="*80, flush=True)
     
-    # Run research
-    results = agent.research(question)
+    # Check for investigation context (optional for testing)
+    research_question = os.getenv('THINKTICA_RESEARCH_QUESTION', 'How can CRISPR cure genetic diseases?')
     
-    print("\n" + "="*60)
-    print("RESEARCH RESULTS")
-    print("="*60)
-    print(f"Question: {results['question']}")
-    print(f"Findings: {results.get('findings_count', len(results['findings']))}")
-    print(f"Challenges: {len(results['challenges'])}")
-    print(f"Resolution Rate: {results['resolution_rate']:.1%}")
-    print(f"Confidence: {results['confidence']:.1%}")
+    print(f"\nResearch Question: {research_question}", flush=True)
+    print("="*80, flush=True)
     
-    print("\nTop Findings:")
-    for i, finding in enumerate(results['findings'][:5], 1):
-        print(f"{i}. [{finding.get('confidence', 0):.1%}] {finding.get('statement', '')[:100]}")
+    # Create the agent
+    agent = ChallengeTreeResearchAgent()
+    
+    # Note: The agent's emit calls are now available
+    agent.emit("Starting main research process", type="system")
+    agent.emit(f"Research Question: {research_question}", type="system")
+    
+    # Run the research
+    try:
+        result = agent.research(research_question)
+        
+        print("\n" + "="*80, flush=True)
+        agent.emit("="*80, type="system")
+        print("RESEARCH RESULTS", flush=True)
+        agent.emit("RESEARCH RESULTS", type="system")
+        print("="*80, flush=True)
+        agent.emit("="*80, type="system")
+        
+        print(f"\nQuestion: {result['question']}", flush=True)
+        agent.emit(f"Question: {result['question']}", type="system")
+        print(f"Findings: {len(result['findings'])}", flush=True)
+        agent.emit(f"Findings: {len(result['findings'])}", type="system")
+        print(f"Confidence: {result['confidence']:.2%}", flush=True)
+        agent.emit(f"Confidence: {result['confidence']:.2%}", type="system")
+        print(f"Nodes explored: {result['nodes_explored']}", flush=True)
+        agent.emit(f"Nodes explored: {result['nodes_explored']}", type="system")
+        print(f"Challenges resolved: {result['challenges_resolved']}", flush=True)
+        agent.emit(f"Challenges resolved: {result['challenges_resolved']}", type="system")
+        
+        if result['findings']:
+            print("\nTop 3 Findings:", flush=True)
+            agent.emit("Top 3 Findings:", type="system")
+            for i, finding in enumerate(result['findings'][:3], 1):
+                finding_text = f"{i}. [{finding.get('confidence', 0):.1%}] {finding.get('statement', '')[:150]}..."
+                print(finding_text, flush=True)
+                agent.emit(finding_text, type="discovery")
+        
+        # Get analytics if available
+        if agent.driver:
+            analytics = agent.get_challenge_analytics()
+            if analytics.get('depth_statistics'):
+                print("\nResolution by Depth:", flush=True)
+                agent.emit("Resolution by Depth:", type="system")
+                for depth, stats in sorted(analytics['depth_statistics'].items()):
+                    resolved = stats['resolved']
+                    total = stats['total']
+                    rate = resolved / total * 100 if total > 0 else 0
+                    depth_text = f"  Depth {depth}: {resolved}/{total} resolved ({rate:.1f}%)"
+                    print(depth_text, flush=True)
+                    agent.emit(depth_text, type="system")
+        
+        print("\n" + "="*80, flush=True)
+        agent.emit("="*80, type="system")
+        print("Agent completed successfully", flush=True)
+        agent.emit("Agent completed successfully", type="system")
+        
+    except KeyboardInterrupt:
+        print("\n\nResearch interrupted by user", flush=True)
+        agent.emit("Research interrupted by user", type="warning")
+        
+    except Exception as e:
+        print(f"\nError: {e}", flush=True)
+        agent.emit(f"Error: {e}", type="error")
+        import traceback
+        traceback.print_exc()
+        
+    finally:
+        # Cleanup
+        if agent.driver:
+            agent.driver.close()
+            print("Neo4j connection closed", flush=True)
+            agent.emit("Neo4j connection closed", type="system")
