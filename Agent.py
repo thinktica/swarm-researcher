@@ -23,9 +23,34 @@ import time
 import re
 from pathlib import Path
 
+print("Before os.environ['PYTHONUNBUFFERED'] = '1' (print statement)")
+logger.info("Before os.environ['PYTHONUNBUFFERED'] = '1' (logger statement)")
 # Force unbuffered output for immediate console logs
 os.environ['PYTHONUNBUFFERED'] = '1'
 sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
+
+print("After os.environ['PYTHONUNBUFFERED'] = '1' (print statement)")
+logger.info("After os.environ['PYTHONUNBUFFERED'] = '1' (logger statement)")
+
+
+print("Before logging.basicConfig (print statement)")
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+print("After logging.basicConfig (print statement)")
+logger.info("After logging.basicConfig (logger statement)")
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    print("Loaded .env file (print statement)")
+    logger.info("Loaded .env file (logger statement)")
+except ImportError:
+    print("python-dotenv not installed, using system environment variables (print statement)")
+    logger.info("python-dotenv not installed, using system environment variables (logger statement)")
 
 # Import Thinktica base class and event system
 print("Before try: block to import Thinktica (print statement)")
@@ -44,19 +69,8 @@ except ImportError as e:
 print("After try: block to import Thinktica")
 logger.info("After try: block to import Thinktica (logger statement)")
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-    logger.info("Loaded .env file")
-except ImportError:
-    logger.info("python-dotenv not installed, using system environment variables")
+
 
 # Initialize availability flags
 EMBEDDINGS_AVAILABLE = False
