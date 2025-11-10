@@ -23,16 +23,6 @@ import time
 import re
 from pathlib import Path
 
-print("Before os.environ['PYTHONUNBUFFERED'] = '1' (print statement)")
-logger.info("Before os.environ['PYTHONUNBUFFERED'] = '1' (logger statement)")
-# Force unbuffered output for immediate console logs
-os.environ['PYTHONUNBUFFERED'] = '1'
-sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
-
-print("After os.environ['PYTHONUNBUFFERED'] = '1' (print statement)")
-logger.info("After os.environ['PYTHONUNBUFFERED'] = '1' (logger statement)")
-
-
 print("Before logging.basicConfig (print statement)")
 # Configure logging
 logging.basicConfig(
@@ -42,6 +32,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 print("After logging.basicConfig (print statement)")
 logger.info("After logging.basicConfig (logger statement)")
+
+print("Before os.environ['PYTHONUNBUFFERED'] = '1' (print statement)")
+logger.info("Before os.environ['PYTHONUNBUFFERED'] = '1' (logger statement)")
+# Force unbuffered output for immediate console logs
+os.environ['PYTHONUNBUFFERED'] = '1'
+sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
+
+print("After os.environ['PYTHONUNBUFFERED'] = '1' (print statement)")
+logger.info("After os.environ['PYTHONUNBUFFERED'] = '1' (logger statement)")
+
 
 try:
     from dotenv import load_dotenv
@@ -78,6 +78,7 @@ TRANSFORMERS_AVAILABLE = False
 LLAMACPP_AVAILABLE = False
 SentenceTransformer = None
 
+'''
 # Core imports with auto-installation
 try:
     from neo4j import GraphDatabase
@@ -118,6 +119,9 @@ try:
 except ImportError:
     logger.info("llama-cpp not available")
     LLAMACPP_AVAILABLE = False
+'''
+
+ logger.info("AFTER COMMENTED IMPORTS AUTO-INSTALLATION")
 
 
 class NodeType(Enum):
@@ -2111,6 +2115,9 @@ class ChallengeTreeResearchAgent(ResearchAgent):
 
 def main():
     """Main entry point"""
+
+    print("main() called (print statement)")
+    logger.info("main() called (logger statement)")
     
     print("\n" + "="*80, flush=True)
     print("CHALLENGE-DRIVEN SWARM INTELLIGENCE RESEARCH SYSTEM", flush=True)
