@@ -2101,18 +2101,24 @@ def main():
     print("\n" + "="*80, flush=True)
     print("CHALLENGE-DRIVEN SWARM INTELLIGENCE RESEARCH SYSTEM", flush=True)
     print("="*80, flush=True)
+    logger.info("Starting main research process (logger statement)")
     
     # Check for investigation context (optional for testing)
     research_question = os.getenv('THINKTICA_RESEARCH_QUESTION', 'How can CRISPR cure genetic diseases?')
     
     print(f"\nResearch Question: {research_question}", flush=True)
     print("="*80, flush=True)
+    logger.info(f"Research Question: {research_question} (logger statement)")
     
     # Create the agent
     agent = ChallengeTreeResearchAgent()
     
     # Note: The agent's emit calls are now available
+    print("Starting main research process (print statement)")
+    logger.info("Starting main research process (logger statement)")
     agent.emit("Starting main research process", type="system")
+    print("Research Question: {research_question} (print statement)")
+    logger.info(f"Research Question: {research_question} (logger statement)")
     agent.emit(f"Research Question: {research_question}", type="system")
     
     # Run the research
