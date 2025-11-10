@@ -28,12 +28,21 @@ os.environ['PYTHONUNBUFFERED'] = '1'
 sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
 
 # Import Thinktica base class and event system
+print("Before try: block to import Thinktica (print statement)")
+logger.info("Before try: block to import Thinktica (logger statement)")
 try:
+    print("Trying to import Thinktica")
+    logger.info("Trying to import Thinktica (logger statement)")
     from thinktica import ResearchAgent
-except ImportError:
-    print("Installing thinktica...", flush=True)
-    subprocess.run([sys.executable, "-m", "pip", "install", "thinktica"])
-    from thinktica import ResearchAgent
+    THINKTICA_AVAILABLE = True
+    print("[IMPORT] ✅ Thinktica loaded successfully!")
+    logger.info("[IMPORT] ✅ Thinktica loaded successfully!")
+except ImportError as e:
+    print(f"[IMPORT] ⚠️ Thinktica not found: {e}")
+    logger.info(f"[IMPORT] ⚠️ Thinktica not found (logger statement): {e}")
+
+print("After try: block to import Thinktica")
+logger.info("After try: block to import Thinktica (logger statement)")
 
 # Configure logging
 logging.basicConfig(
@@ -191,14 +200,21 @@ class LocalLLMBackend:
         self.backend = None
         self.model = None
         self.agent = agent  # Reference to parent agent for event emission
+        logger.info("LocalLLMBackend initialized (logger statement)")
+        print("LocalLLMBackend initialized (print statement)")
         self._initialize_backend()
+        print("Backend initialized (print statement)")
+        logger.info("Backend initialized (logger statement)")
     
     def _initialize_backend(self):
         """Initialize the best available backend"""
-        
+
+        logger.info("Initializing backend (logger statement)")
+        print("Initializing backend (print statement)")
         if self._try_llamacpp():
             self.backend = 'llamacpp'
             logger.info("Using Llama.cpp backend")
+            print("Using Llama.cpp backend (print statement)")
             if self.agent:
                 self.agent.emit("LLM backend initialized", type="system", backend="llamacpp")
             return
@@ -206,6 +222,7 @@ class LocalLLMBackend:
         if self._try_transformers():
             self.backend = 'transformers'
             logger.info("Using Transformers backend")
+            print("Using Transformers backend (print statement)")
             if self.agent:
                 self.agent.emit("LLM backend initialized", type="system", backend="transformers")
             return
@@ -213,10 +230,12 @@ class LocalLLMBackend:
         if self._try_ollama():
             self.backend = 'ollama'
             logger.info("Using Ollama backend")
+            print("Using Ollama backend (print statement)")
             if self.agent:
                 self.agent.emit("LLM backend initialized", type="system", backend="ollama")
             return
-        
+        print("No local LLM available - using mock responses (print statement)")
+        logger.info("No local LLM available - using mock responses (logger statement)")
         logger.warning("No local LLM available - using mock responses")
         if self.agent:
             self.agent.emit("No LLM available - using mock responses", type="warning")
@@ -252,6 +271,7 @@ class LocalLLMBackend:
         
         if not model_path.exists():
             logger.info("Downloading Mistral 7B Q4 model...")
+            print("Downloading Mistral 7B Q4 model... (print statement)")
             if self.agent:
                 self.agent.emit("Downloading Mistral 7B model...", type="progress")
             url = "https://huggingface.co/TheBloke/Mistral-7B-Instruct-v0.2-GGUF/resolve/main/mistral-7b-instruct-v0.2.Q4_K_M.gguf"
