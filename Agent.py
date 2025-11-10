@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Challenge-Driven Swarm Intelligence Research Agent
+Challenge-Driven v1.0 Swarm Intelligence Research Agent
 ===================================================
 Enhanced with hierarchical challenge resolution system
 Now with proper Thinktica event system integration
