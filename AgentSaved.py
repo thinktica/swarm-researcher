@@ -126,11 +126,18 @@ class ThinkticaAdapter:
             from thinktica.core.events import emit as global_emit
             
             # We control exactly what gets passed - no conflicts!
+            '''
             global_emit(
                 message,
                 agent=self.agent_name,
                 workspace=self.workspace,
                 **kwargs
+            )
+            '''
+            global_emit(
+                message,
+                type="system",
+                timestamp=datetime.now().isoformat()
             )
 
         except ImportError:
@@ -332,33 +339,9 @@ class LocalLLMBackend:
         except ImportError:
             return False
         
-        # Try multiple possible locations for the model
-        import os
-        possible_paths = [
-            Path.home() / ".cache" / "llm_models" / "mistral-7b-instruct-v0.2.Q4_K_M.gguf",
-            Path("/home/ubuntu/.cache/llm_models/mistral-7b-instruct-v0.2.Q4_K_M.gguf"),
-            Path(os.path.expanduser("~/.cache/llm_models/mistral-7b-instruct-v0.2.Q4_K_M.gguf")),
-        ]
-        
-        model_path = None
-        for path in possible_paths:
-            logger.info(f"Checking for model at: {path}")
-            print(f"Checking for model at: {path}", flush=True)
-            if path.exists():
-                model_path = path
-                model_dir = path.parent
-                logger.info(f"✓ Found model at: {model_path}")
-                print(f"✓ Found model at: {model_path}", flush=True)
-                if self.agent:
-                    self.agent.emit(f"Found model at: {model_path}", type="system")
-                break
-        
-        if model_path is None:
-            # Default to home directory
-            model_dir = Path.home() / ".cache" / "llm_models"
-            model_dir.mkdir(parents=True, exist_ok=True)
-            model_path = model_dir / "mistral-7b-instruct-v0.2.Q4_K_M.gguf"
-            logger.info(f"Model not found, will download to: {model_path}")
+        model_dir = Path.home() / ".cache" / "llm_models"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_path = model_dir / "mistral-7b-instruct-v0.2.Q4_K_M.gguf"
         
         if not model_path.exists():
             logger.info("Downloading Mistral 7B Q4 model...")
@@ -392,17 +375,11 @@ class LocalLLMBackend:
                 return False
         
         try:
-            import time
-            start_time = time.time()
-
             logger.info("Loading Mistral 7B Q4 model...")
-            print("=" * 80, flush=True)
-            print("Loading Mistral 7B model... (this may take 2-3 minutes)", flush=True)
-            print("Please wait, model is loading into memory...", flush=True)
-            print("=" * 80, flush=True)
+            print("Loading Mistral 7B model... (this may take 30-60 seconds)", flush=True)
             if self.agent:
                 self.agent.emit("Loading Mistral 7B model...", type="progress")
-
+            
             self.model = Llama(
                 model_path=str(model_path),
                 n_ctx=2048,
@@ -411,32 +388,18 @@ class LocalLLMBackend:
                 verbose=False,
                 seed=42
             )
-
-            load_time = time.time() - start_time
-            logger.info(f"Model loaded in {load_time:.1f} seconds, running test inference...")
-            print(f"✓ Model loaded in {load_time:.1f} seconds ({load_time/60:.1f} minutes)", flush=True)
-            print("Running test inference to verify model...", flush=True)
-
-            test_start = time.time()
+            
             test_response = self.model(
                 "Hello, this is a test.",
                 max_tokens=10,
                 temperature=0.1
             )
-            test_time = time.time() - test_start
-
+            
             if test_response and 'choices' in test_response:
-                total_time = time.time() - start_time
-                logger.info(f"Model verified successfully! Total time: {total_time:.1f}s")
-                print("=" * 80, flush=True)
-                print(f"✓ MODEL READY!", flush=True)
-                print(f"  - Load time: {load_time:.1f}s ({load_time/60:.1f} min)", flush=True)
-                print(f"  - Test inference: {test_time:.1f}s", flush=True)
-                print(f"  - Total time: {total_time:.1f}s ({total_time/60:.1f} min)", flush=True)
-                print(f"✓ Shared LLM backend is ready for all swarm agents!", flush=True)
-                print("=" * 80, flush=True)
+                logger.info("Model loaded successfully!")
+                print("✓ Model loaded successfully!", flush=True)
                 if self.agent:
-                    self.agent.emit(f"Model ready (loaded in {load_time:.1f}s)", type="system")
+                    self.agent.emit("Model loaded successfully", type="system")
                 return True
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
@@ -594,13 +557,13 @@ class LocalLLMBackend:
 
 class LocalSwarmAgent:
     """Base class for local swarm agents"""
-
-    def __init__(self, role: SwarmRole, parent_agent=None, shared_llm_backend=None):
+    
+    def __init__(self, role: SwarmRole, parent_agent=None):
         self.role = role
         self.processing_count = 0
         self.parent_agent = parent_agent  # Reference to main agent for events
-        self.llm_backend = shared_llm_backend  # Use shared backend if provided
-
+        self.llm_backend = None
+    
     def _get_llm_backend(self):
         """Get LLM backend (create if needed)"""
         if self.llm_backend is None:
@@ -632,9 +595,9 @@ class LocalSwarmAgent:
 
 class ChallengeExtractorAgent(LocalSwarmAgent):
     """Extract challenges from text"""
-
-    def __init__(self, parent_agent=None, shared_llm_backend=None):
-        super().__init__(SwarmRole.CHALLENGE_EXTRACTOR, parent_agent, shared_llm_backend)
+    
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.CHALLENGE_EXTRACTOR, parent_agent)
     
     def extract_challenges(self, response: str, context: SwarmContext) -> List[Challenge]:
         """Extract challenges from response"""
@@ -693,9 +656,9 @@ class ChallengeExtractorAgent(LocalSwarmAgent):
 
 class ChallengeSpecifierAgent(LocalSwarmAgent):
     """Break challenges into specific sub-challenges"""
-
-    def __init__(self, parent_agent=None, shared_llm_backend=None):
-        super().__init__(SwarmRole.CHALLENGE_SPECIFIER, parent_agent, shared_llm_backend)
+    
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.CHALLENGE_SPECIFIER, parent_agent)
     
     def specify_challenge(self, challenge: Challenge, context: SwarmContext) -> List[Challenge]:
         """Break down challenge into specific sub-challenges"""
@@ -739,9 +702,9 @@ class ChallengeSpecifierAgent(LocalSwarmAgent):
 
 class ResolutionAgent(LocalSwarmAgent):
     """Attempt to resolve challenges"""
-
-    def __init__(self, parent_agent=None, shared_llm_backend=None):
-        super().__init__(SwarmRole.RESOLUTION_AGENT, parent_agent, shared_llm_backend)
+    
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.RESOLUTION_AGENT, parent_agent)
     
     def attempt_resolution(self, challenge: Challenge, findings: List[Dict], context: SwarmContext) -> Dict:
         """Try to resolve challenge with available information"""
@@ -799,9 +762,9 @@ class ResolutionAgent(LocalSwarmAgent):
 
 class AnalyzerAgent(LocalSwarmAgent):
     """Deep analysis of responses"""
-
-    def __init__(self, parent_agent=None, shared_llm_backend=None):
-        super().__init__(SwarmRole.ANALYZER, parent_agent, shared_llm_backend)
+    
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.ANALYZER, parent_agent)
     
     def analyze_response(self, response: str, context: SwarmContext) -> Dict:
         """Analyze response in detail"""
@@ -842,9 +805,9 @@ class AnalyzerAgent(LocalSwarmAgent):
 
 class ExtractorAgent(LocalSwarmAgent):
     """Extract findings from text"""
-
-    def __init__(self, parent_agent=None, shared_llm_backend=None):
-        super().__init__(SwarmRole.EXTRACTOR, parent_agent, shared_llm_backend)
+    
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.EXTRACTOR, parent_agent)
     
     def extract_findings(self, response: str, analysis: Dict) -> List[Dict]:
         """Extract concrete findings"""
@@ -891,9 +854,9 @@ class ExtractorAgent(LocalSwarmAgent):
 
 class ComparatorAgent(LocalSwarmAgent):
     """Compare findings to goals"""
-
-    def __init__(self, parent_agent=None, shared_llm_backend=None):
-        super().__init__(SwarmRole.COMPARATOR, parent_agent, shared_llm_backend)
+    
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.COMPARATOR, parent_agent)
     
     def compare_to_goals(self, findings: List[Dict], context: SwarmContext) -> Dict:
         """Compare findings to research goals"""
@@ -936,9 +899,9 @@ class ComparatorAgent(LocalSwarmAgent):
 
 class ChallengerAgent(LocalSwarmAgent):
     """Generate challenges from findings"""
-
-    def __init__(self, parent_agent=None, shared_llm_backend=None):
-        super().__init__(SwarmRole.CHALLENGER, parent_agent, shared_llm_backend)
+    
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.CHALLENGER, parent_agent)
     
     def generate_challenges(self, findings: List[Dict], context: SwarmContext) -> List[str]:
         """Generate challenging questions"""
@@ -972,9 +935,9 @@ class ChallengerAgent(LocalSwarmAgent):
 
 class EvaluatorAgent(LocalSwarmAgent):
     """Evaluate iteration quality"""
-
-    def __init__(self, parent_agent=None, remote_llm=None, shared_llm_backend=None):
-        super().__init__(SwarmRole.EVALUATOR, parent_agent, shared_llm_backend)
+    
+    def __init__(self, parent_agent=None, remote_llm=None):
+        super().__init__(SwarmRole.EVALUATOR, parent_agent)
         self.quality_threshold = 0.5
         self.remote_llm = remote_llm
     
@@ -1047,9 +1010,9 @@ class EvaluatorAgent(LocalSwarmAgent):
 
 class HypothesisAgent(LocalSwarmAgent):
     """Generate hypotheses"""
-
-    def __init__(self, parent_agent=None, shared_llm_backend=None):
-        super().__init__(SwarmRole.HYPOTHESIS, parent_agent, shared_llm_backend)
+    
+    def __init__(self, parent_agent=None):
+        super().__init__(SwarmRole.HYPOTHESIS, parent_agent)
     
     def generate_hypotheses(self, context: SwarmContext) -> List[Dict]:
         """Generate new hypotheses"""
@@ -1121,35 +1084,24 @@ class HypothesisAgent(LocalSwarmAgent):
 
 class SwarmOrchestrator:
     """Enhanced orchestrator with challenge management"""
-
+    
     def __init__(self, parent_agent=None, neo4j_driver=None, remote_llm=None):
         self.parent_agent = parent_agent  # Reference to main agent
         self.driver = neo4j_driver
         self.remote_llm = remote_llm
-
-        # Create ONE shared LLM backend for all agents (loads model only once!)
-        logger.info("Creating shared LLM backend for all swarm agents...")
-        print("Creating shared LLM backend for all swarm agents...", flush=True)
-        if parent_agent:
-            parent_agent.emit("Creating shared LLM backend...", type="system")
-
-        shared_llm = LocalLLMBackend(parent_agent)
-
-        if parent_agent:
-            parent_agent.emit("Shared LLM backend ready", type="system")
-
-        # Initialize all agents with shared LLM backend
-        self.analyzer = AnalyzerAgent(parent_agent, shared_llm)
-        self.extractor = ExtractorAgent(parent_agent, shared_llm)
-        self.comparator = ComparatorAgent(parent_agent, shared_llm)
-        self.challenger = ChallengerAgent(parent_agent, shared_llm)
-        self.evaluator = EvaluatorAgent(parent_agent, remote_llm, shared_llm)
-        self.hypothesis = HypothesisAgent(parent_agent, shared_llm)
-
+        
+        # Initialize all agents with parent reference
+        self.analyzer = AnalyzerAgent(parent_agent)
+        self.extractor = ExtractorAgent(parent_agent)
+        self.comparator = ComparatorAgent(parent_agent)
+        self.challenger = ChallengerAgent(parent_agent)
+        self.evaluator = EvaluatorAgent(parent_agent, remote_llm)
+        self.hypothesis = HypothesisAgent(parent_agent)
+        
         # New challenge agents
-        self.challenge_extractor = ChallengeExtractorAgent(parent_agent, shared_llm)
-        self.challenge_specifier = ChallengeSpecifierAgent(parent_agent, shared_llm)
-        self.resolution_agent = ResolutionAgent(parent_agent, shared_llm)
+        self.challenge_extractor = ChallengeExtractorAgent(parent_agent)
+        self.challenge_specifier = ChallengeSpecifierAgent(parent_agent)
+        self.resolution_agent = ResolutionAgent(parent_agent)
         
         # Research tree
         self.research_tree: Dict[str, ResearchNode] = {}
@@ -2331,6 +2283,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# Compatibility alias for Thinktica
-Agent = ChallengeTreeResearchAgent
